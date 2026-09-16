@@ -1467,7 +1467,6 @@ function OrderEditor({ form, me, forms, saveForms, onBack, balance }) {
   const [note, setNote] = useState(existing ? existing.note || "" : "");
   const [custom, setCustom] = useState({ name: "", price: "" });
   const [saved, setSaved] = useState(false);
-  const [q, setQ] = useState("");
 
   if (!form) return <Empty icon={FileText} title="找不到這張表單" action={<Btn onClick={onBack}>返回</Btn>} />;
 
@@ -1509,7 +1508,7 @@ function OrderEditor({ form, me, forms, saveForms, onBack, balance }) {
     onBack();
   };
 
-  const menu = form.items.filter((i) => i.name.includes(q));
+  const menu = form.items;
 
   return (
     <div className="pb-24">
@@ -1531,12 +1530,6 @@ function OrderEditor({ form, me, forms, saveForms, onBack, balance }) {
 
       {!locked && (
         <Panel className="mb-5">
-          <div className="border-b border-stone-200 p-3">
-            <div className="relative">
-              <Search size={15} className="absolute left-3 top-3 text-stone-400" />
-              <input className={inputCls + " pl-9"} value={q} onChange={(e) => setQ(e.target.value)} placeholder="搜尋菜單" />
-            </div>
-          </div>
           <div className="grid max-h-72 grid-cols-2 gap-2 overflow-y-auto p-3 sm:grid-cols-3">
             {menu.map((i) => (
               <button key={i.id} onClick={() => addLine(i)}
@@ -1545,10 +1538,10 @@ function OrderEditor({ form, me, forms, saveForms, onBack, balance }) {
                 <span className="block text-sm tabular-nums mo-text-mid">{money(i.price)}</span>
               </button>
             ))}
-            {menu.length === 0 && <p className="col-span-full py-6 text-center text-sm text-stone-500">菜單上沒有這一項</p>}
+            {menu.length === 0 && <p className="col-span-full py-6 text-center text-sm text-stone-500">這張表單還沒有預先列出品項，請在下面手動加入</p>}
           </div>
           <div className="flex flex-wrap gap-2 border-t border-stone-200 p-3">
-            <input className={inputCls + " min-w-0 flex-1 basis-full sm:basis-auto"} value={custom.name} placeholder="菜單沒有的品項"
+            <input className={inputCls + " min-w-0 flex-1 basis-full sm:basis-auto"} value={custom.name} placeholder="品項"
               onChange={(e) => setCustom({ ...custom, name: e.target.value })} />
             <input className={inputCls + " w-24 tabular-nums"} type="number" value={custom.price} placeholder="價格"
               onChange={(e) => setCustom({ ...custom, price: e.target.value })} />
