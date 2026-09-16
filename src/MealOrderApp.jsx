@@ -814,14 +814,21 @@ function AdminFormDetail({ form, users, balances, onBack, forms, saveForms, txs,
     const names = freshForm.orders.map((o) => `${o.userName} ${money(o.total)}`).join("\n");
     const ok = await askConfirm({ title: "確認扣款", body: `以下金額會從各自的儲值金扣除：\n\n${names}\n\n合計 ${money(freshTotal)}\n\n扣款後這張表單就會鎖住。`, confirmLabel: "確認扣款" });
     if (!ok) return;
+    // 確認框開著、等管理員點擊的這段時間也可能被別人（或另一個分頁）搶先結算，
+    // 真正寫入前再檢查一次最新狀態，避免同一張表單被結算兩次、重複扣款。
+    const latest = await fetchState();
+    const latestForm = latest.forms.find((f) => f.id === form.id);
+    if (!latestForm || latestForm.settled) {
+      return askNotice("已經結算過了", "剛剛確認的同時，這張表單已經被結算了，不用重複操作。");
+    }
     const stamp = new Date().toISOString();
-    const newTxs = freshForm.orders.map((o) => ({
-      id: uid(), userId: o.userId, userName: o.userName, date: freshForm.date, ts: stamp,
-      amount: -o.total, type: "order", reason: freshForm.title, formId: freshForm.id,
+    const newTxs = latestForm.orders.map((o) => ({
+      id: uid(), userId: o.userId, userName: o.userName, date: latestForm.date, ts: stamp,
+      amount: -o.total, type: "order", reason: latestForm.title, formId: latestForm.id,
       items: o.lines.map((l) => ({ name: l.name, note: l.note || "", qty: l.qty, price: l.price })),
     }));
-    await saveTxs([...newTxs, ...fresh.tx]);
-    await saveForms(fresh.forms.map((f) => (f.id === freshForm.id ? { ...f, settled: true, closed: true, settledAt: stamp } : f)));
+    await saveTxs([...newTxs, ...latest.tx]);
+    await saveForms(latest.forms.map((f) => (f.id === latestForm.id ? { ...f, settled: true, closed: true, settledAt: stamp } : f)));
   };
 
   const removeOrder = async (oid) => {
