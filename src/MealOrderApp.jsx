@@ -803,18 +803,25 @@ function AdminFormDetail({ form, users, balances, onBack, forms, saveForms, txs,
 
   const settle = async () => {
     if (form.settled) return;
-    if (form.orders.length === 0) return askNotice("還沒有人填單", "至少要有一筆訂單才能結算。");
-    const names = form.orders.map((o) => `${o.userName} ${money(o.total)}`).join("\n");
-    const ok = await askConfirm({ title: "確認扣款", body: `以下金額會從各自的儲值金扣除：\n\n${names}\n\n合計 ${money(total)}\n\n扣款後這張表單就會鎖住。`, confirmLabel: "確認扣款" });
+    // 結算前先重新抓一次最新資料：避免用畫面上舊的訂單清單結算，漏掉別人剛好在這幾秒內送出的訂單，
+    // 也避免拿舊資料整包蓋掉其他人同一時間的異動。
+    const fresh = await fetchState();
+    const freshForm = fresh.forms.find((f) => f.id === form.id);
+    if (!freshForm) return askNotice("找不到這張表單", "這張表單可能已經被刪除了，請返回重新整理。");
+    if (freshForm.settled) return askNotice("已經結算過了", "這張表單剛剛已經被結算過，不用重複操作。");
+    if (freshForm.orders.length === 0) return askNotice("還沒有人填單", "至少要有一筆訂單才能結算。");
+    const freshTotal = freshForm.orders.reduce((s, o) => s + o.total, 0);
+    const names = freshForm.orders.map((o) => `${o.userName} ${money(o.total)}`).join("\n");
+    const ok = await askConfirm({ title: "確認扣款", body: `以下金額會從各自的儲值金扣除：\n\n${names}\n\n合計 ${money(freshTotal)}\n\n扣款後這張表單就會鎖住。`, confirmLabel: "確認扣款" });
     if (!ok) return;
     const stamp = new Date().toISOString();
-    const newTxs = form.orders.map((o) => ({
-      id: uid(), userId: o.userId, userName: o.userName, date: form.date, ts: stamp,
-      amount: -o.total, type: "order", reason: form.title, formId: form.id,
+    const newTxs = freshForm.orders.map((o) => ({
+      id: uid(), userId: o.userId, userName: o.userName, date: freshForm.date, ts: stamp,
+      amount: -o.total, type: "order", reason: freshForm.title, formId: freshForm.id,
       items: o.lines.map((l) => ({ name: l.name, note: l.note || "", qty: l.qty, price: l.price })),
     }));
-    await saveTxs([...newTxs, ...txs]);
-    await saveForms(forms.map((f) => (f.id === form.id ? { ...f, settled: true, closed: true, settledAt: stamp } : f)));
+    await saveTxs([...newTxs, ...fresh.tx]);
+    await saveForms(fresh.forms.map((f) => (f.id === freshForm.id ? { ...f, settled: true, closed: true, settledAt: stamp } : f)));
   };
 
   const removeOrder = async (oid) => {
@@ -1495,13 +1502,24 @@ function OrderEditor({ form, me, forms, saveForms, onBack, balance }) {
 
   const submit = async () => {
     if (lines.length === 0) return askNotice("還沒選餐點", "從上面的菜單點一下就會加進來。");
+    // 送出前先重新抓一次最新資料：如果表單這幾秒內被管理員截止或結算了，就擋下來，
+    // 不要拿畫面上舊的表單狀態整包蓋回去（會把管理員剛做的截止/結算蓋掉）。
+    const fresh = await fetchState();
+    const freshForm = fresh.forms.find((f) => f.id === form.id);
+    if (!freshForm) return askNotice("找不到這張表單", "這張表單可能已經被刪除了，請返回重新整理。");
+    if (freshForm.closed || freshForm.settled) {
+      return askNotice(
+        freshForm.settled ? "表單已經結算" : "已經截止收單了",
+        freshForm.settled ? "管理員剛好已經完成結算，這筆訂單沒有送出，請直接找管理員處理。" : "要補點請找管理員，這筆訂單沒有送出。"
+      );
+    }
     const order = {
       id: existing ? existing.id : uid(),
       userId: me.id, userName: me.name,
       lines: lines.map((l) => ({ name: l.name, price: Number(l.price) || 0, qty: l.qty, note: (l.note || "").trim() })),
       total, note: note.trim(), updatedAt: new Date().toISOString(),
     };
-    const next = forms.map((f) => {
+    const next = fresh.forms.map((f) => {
       if (f.id !== form.id) return f;
       const others = f.orders.filter((o) => o.userId !== me.id);
       return { ...f, orders: [...others, order] };
