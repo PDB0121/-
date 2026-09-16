@@ -1540,16 +1540,18 @@ function OrderEditor({ form, me, forms, saveForms, onBack, balance }) {
             ))}
             {menu.length === 0 && <p className="col-span-full py-6 text-center text-sm text-stone-500">這張表單還沒有預先列出品項，請在下面手動加入</p>}
           </div>
-          <div className="flex flex-wrap gap-2 border-t border-stone-200 p-3">
-            <input className={inputCls + " min-w-0 flex-1 basis-full sm:basis-auto"} value={custom.name} placeholder="品項"
+          <div className="flex flex-col gap-2 border-t border-stone-200 p-3 sm:flex-row">
+            <input className={inputCls + " min-w-0 sm:w-auto sm:flex-1"} value={custom.name} placeholder="品項"
               onChange={(e) => setCustom({ ...custom, name: e.target.value })} />
-            <input className={inputCls + " w-24 tabular-nums"} type="number" value={custom.price} placeholder="價格"
-              onChange={(e) => setCustom({ ...custom, price: e.target.value })} />
-            <Btn variant="quiet" onClick={() => {
-              if (!custom.name.trim()) return;
-              addLine({ name: custom.name.trim(), price: Number(custom.price) || 0 });
-              setCustom({ name: "", price: "" });
-            }}>加入</Btn>
+            <div className="flex gap-2 self-start">
+              <input className={inputCls + " w-24 tabular-nums"} type="number" value={custom.price} placeholder="價格"
+                onChange={(e) => setCustom({ ...custom, price: e.target.value })} />
+              <Btn variant="quiet" onClick={() => {
+                if (!custom.name.trim()) return;
+                addLine({ name: custom.name.trim(), price: Number(custom.price) || 0 });
+                setCustom({ name: "", price: "" });
+              }}>加入</Btn>
+            </div>
           </div>
         </Panel>
       )}
