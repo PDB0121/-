@@ -387,10 +387,19 @@ export default function MealOrderApp() {
 
   useEffect(() => { refresh(true); }, [refresh]);
 
-  // 即時同步：每 12 秒拉一次，讓多人填的表單會自動彙整進來
+  // 即時同步：分頁在前景時每 12 秒拉一次，讓多人填的表單會自動彙整進來；
+  // 切到背景分頁就暫停，省掉閒置分頁白打的請求，切回來時立刻補拉一次。
   useEffect(() => {
-    const i = setInterval(() => refresh(true), 12000);
-    return () => clearInterval(i);
+    let timer = null;
+    const start = () => { if (!timer) timer = setInterval(() => refresh(true), 12000); };
+    const stop = () => { if (timer) { clearInterval(timer); timer = null; } };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") { refresh(true); start(); }
+      else stop();
+    };
+    if (document.visibilityState === "visible") start();
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => { stop(); document.removeEventListener("visibilitychange", onVisibilityChange); };
   }, [refresh]);
 
   const saveUsers = async (next) => { setUsers(next); await saveState("users", next); };
@@ -501,7 +510,7 @@ export default function MealOrderApp() {
 
         {syncedAt && (
           <p className="mt-8 text-center text-xs text-stone-400">
-            最後同步 {syncedAt.toLocaleTimeString("zh-TW", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}，每 12 秒自動更新
+            最後同步 {syncedAt.toLocaleTimeString("zh-TW", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}，畫面開著時每 12 秒自動更新
           </p>
         )}
       </main>
