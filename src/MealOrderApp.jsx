@@ -286,7 +286,7 @@ function ItemRows({ items, setItems, emptyHint }) {
         {items.map((i) => (
           <div key={i.id} className="rounded-lg border border-stone-200 p-2.5">
             <div className="flex items-center gap-2">
-              <input className={inputCls + " flex-1 font-medium"} value={i.name} placeholder="品項名稱，例如：招牌焢肉飯"
+              <input className={inputCls + " min-w-0 flex-1 font-medium"} value={i.name} placeholder="品項名稱，例如：招牌焢肉飯"
                 onChange={(e) => patch(i.id, { name: e.target.value })} />
               <button onClick={() => drop(i.id)} title="刪除這一項"
                 className="shrink-0 rounded-lg px-2 py-2 text-stone-400 hover:bg-red-50 hover:text-red-800"><Trash2 size={16} /></button>
@@ -1547,8 +1547,8 @@ function OrderEditor({ form, me, forms, saveForms, onBack, balance }) {
             ))}
             {menu.length === 0 && <p className="col-span-full py-6 text-center text-sm text-stone-500">菜單上沒有這一項</p>}
           </div>
-          <div className="flex gap-2 border-t border-stone-200 p-3">
-            <input className={inputCls + " flex-1"} value={custom.name} placeholder="菜單沒有的品項"
+          <div className="flex flex-wrap gap-2 border-t border-stone-200 p-3">
+            <input className={inputCls + " min-w-0 flex-1 basis-full sm:basis-auto"} value={custom.name} placeholder="菜單沒有的品項"
               onChange={(e) => setCustom({ ...custom, name: e.target.value })} />
             <input className={inputCls + " w-24 tabular-nums"} type="number" value={custom.price} placeholder="價格"
               onChange={(e) => setCustom({ ...custom, price: e.target.value })} />
