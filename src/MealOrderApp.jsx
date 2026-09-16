@@ -710,10 +710,8 @@ function CreateForm({ open, onClose, onCreate }) {
 
   const create = () => {
     const clean = items.filter((i) => i.name.trim());
-    if (!title.trim()) return setErr("先幫這張表單取個名字。");
-    if (clean.length === 0) return setErr("至少要有一個品項。");
     onCreate({
-      id: uid(), title: title.trim(), date, createdAt: new Date().toISOString(),
+      id: uid(), title: title.trim() || date, date, createdAt: new Date().toISOString(),
       items: clean.map((i) => ({ ...i, name: i.name.trim(), price: Number(i.price) || 0 })),
       orders: [], closed: false, settled: false, menuImage: preview || null,
     });
