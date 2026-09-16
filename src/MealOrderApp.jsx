@@ -305,24 +305,6 @@ function ItemRows({ items, setItems, emptyHint }) {
   );
 }
 
-/* ---------------- menu recognition ----------------
-   實際呼叫 Anthropic API 的動作在後端 /api/recognize-menu 完成（API 金鑰只存在伺服器上）。 */
-async function recognizeMenu(base64, mediaType) {
-  const res = await fetch(`${API_BASE}/recognize-menu`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ image: base64, mediaType }),
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || ("辨識服務回應 " + res.status));
-  return {
-    shop: data.shop || "",
-    items: (data.items || []).map((i) => ({
-      id: uid(), name: String(i.name || "").trim(), price: Number(i.price) || 0, group: i.group || "",
-    })).filter((i) => i.name),
-  };
-}
-
 /* 把原圖縮小成適合長期保存在共用儲存空間的大小，避免多張表單疊起來超過容量上限 */
 function resizeImage(dataUrl, maxDim = 1280, quality = 0.72) {
   return new Promise((resolve) => {
@@ -691,7 +673,7 @@ function AdminForms({ forms, saveForms, onOpen }) {
   );
 }
 
-/* ---------------- 建立表單（菜單辨識） ---------------- */
+/* ---------------- 建立表單 ---------------- */
 function CreateForm({ open, onClose, onCreate }) {
   const [title, setTitle] = useState("");
   const [date, setDate] = useState(today());
@@ -710,21 +692,16 @@ function CreateForm({ open, onClose, onCreate }) {
     if (!file) return;
     setErr(""); setBusy(true);
     try {
-      const base64 = await new Promise((res, rej) => {
+      const dataUrl = await new Promise((res, rej) => {
         const r = new FileReader();
-        r.onload = () => res(String(r.result).split(",")[1]);
+        r.onload = () => res(String(r.result));
         r.onerror = () => rej(new Error("讀取圖片失敗"));
         r.readAsDataURL(file);
       });
-      const rawUrl = `data:${file.type};base64,${base64}`;
-      const compressed = await resizeImage(rawUrl);
-      setPreview(compressed || rawUrl);
-      const out = await recognizeMenu(base64, file.type);
-      setItems(out.items);
-      if (!title && out.shop) setTitle(out.shop);
-      if (out.items.length === 0) setErr("這張圖沒讀到品項，請手動加入。");
+      const compressed = await resizeImage(dataUrl);
+      setPreview(compressed || dataUrl);
     } catch (e2) {
-      setErr("菜單讀取失敗：" + e2.message + "。可以直接手動加品項。");
+      setErr("圖片讀取失敗：" + e2.message);
     } finally {
       setBusy(false);
       if (fileRef.current) fileRef.current.value = "";
@@ -753,15 +730,15 @@ function CreateForm({ open, onClose, onCreate }) {
         {preview && <img src={preview} alt="菜單" className="mx-auto mb-4 max-h-48 rounded-lg" />}
         <input ref={fileRef} type="file" accept="image/*" onChange={onFile} className="hidden" id="menu-file" />
         <Btn variant="accent" disabled={busy} onClick={() => fileRef.current && fileRef.current.click()}>
-          {busy ? <><Loader2 size={16} className="animate-spin" />讀取菜單中</> : <><Upload size={16} />上傳菜單照片</>}
+          {busy ? <><Loader2 size={16} className="animate-spin" />處理中</> : <><Upload size={16} />上傳菜單照片</>}
         </Btn>
-        <p className="mt-2 text-xs text-stone-500">拍一張菜單就好，系統會自動列出品項與價格，你再校對。</p>
+        <p className="mt-2 text-xs text-stone-500">拍一張菜單方便大家填單時對照，品項與價格請在下面手動輸入。</p>
       </div>
 
       {err && <p className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-800">{err}</p>}
 
       <div className="mt-5">
-        <ItemRows items={items} setItems={setItems} emptyHint={busy ? "辨識中…" : "還沒有品項，可上傳菜單或手動加入"} />
+        <ItemRows items={items} setItems={setItems} emptyHint="還沒有品項，手動加入" />
       </div>
 
       <div className="mt-6 flex justify-end gap-2">

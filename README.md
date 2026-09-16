@@ -1,13 +1,12 @@
 # 今天吃什麼 — 訂餐 App
 
-從 Claude Artifact 版本轉換而來的獨立網站，前端用 Vite + React，資料存在 Vercel KV（所有人共用同一份），菜單辨識透過伺服器端呼叫 Claude API（金鑰不會外流到瀏覽器）。部署到 Vercel 之後，任何人點連結就能用，不需要 Claude 帳號或登入。
+從 Claude Artifact 版本轉換而來的獨立網站，前端用 Vite + React，資料存在共用的 Redis 資料庫（所有人共用同一份）。部署到 Vercel 之後，任何人點連結就能用，不需要 Claude 帳號或登入。菜單照片可以上傳給大家對照，但品項與價格是手動輸入，不含自動辨識。
 
 ## 專案結構
 
 ```
 src/MealOrderApp.jsx     所有畫面與邏輯（表單、成員儲值、結算…）
-api/state.js             讀寫共用資料（成員/表單/交易/設定）— 存在 Vercel KV
-api/recognize-menu.js    上傳菜單照片辨識品項 — 伺服器端呼叫 Anthropic API
+api/state.js             讀寫共用資料（成員/表單/交易/設定）— 存在 Redis
 ```
 
 ## 部署到 Vercel（一次性設定，之後改程式碼會自動重新部署）
@@ -38,22 +37,15 @@ git push -u origin main
 2. 「Add New → Project」，選剛剛建立的 `meal-order-app` repo，Import。
 3. Framework 會自動偵測成 Vite，不用改設定，直接按 **Deploy**。第一次部署會失敗或跑起來但存不了資料，沒關係，先讓它跑一次，等下面步驟設完環境變數會自動修好。
 
-### 4. 加上共用資料庫（Vercel KV）
+### 4. 加上共用資料庫（Redis）
 
-1. 進到剛剛建立的專案 → 上方 **Storage** 分頁 → **Create Database** → 選 **KV**（背後是 Upstash Redis，免費額度足夠這種小型用量）。
-2. 建立好之後選 **Connect Project**，把它接到 `meal-order-app` 這個專案（會自動幫你加上 `KV_REST_API_URL`、`KV_REST_API_TOKEN` 等環境變數，不用手動填）。
+Vercel KV 已經停用，現在改用 Marketplace 上的 Redis（背後一樣是 Upstash，免費額度足夠這種小型用量）。**Storage 是帳號/團隊層級的功能，不是進到 project 裡面才有**：
 
-### 5.（選用）加上菜單照片辨識功能
+1. 到 https://vercel.com/dashboard，左側側邊欄點 **Storage**（跟 Overview、Projects 同一排），或直接開 https://vercel.com/marketplace/redis 。
+2. **Create Database**（或 **Add** / **Install**）→ 選 **Redis**。
+3. 選擇要連接的專案，選 `meal-order-app`（或你 import 時取的名字），完成連接（會自動幫你加上 `KV_REST_API_URL` / `UPSTASH_REDIS_REST_URL` 之類的環境變數，不用手動填 — `api/state.js` 兩種命名都會嘗試讀取）。
 
-不設定這步，App 其他功能都正常，只是上傳菜單照片不會自動辨識品項，改成手動輸入品項即可。
-
-1. 到 https://console.anthropic.com 申請一組 API Key（需要綁信用卡，辨識菜單這種用量通常一次幾分錢台幣等級）。
-2. 回到 Vercel 專案 → **Settings → Environment Variables**，新增一筆：
-   - Key: `ANTHROPIC_API_KEY`
-   - Value: 你剛剛申請的金鑰
-   - 套用到 Production（也可以順便勾 Preview / Development）
-
-### 6. 重新部署
+### 5. 重新部署
 
 到 **Deployments** 分頁，點最新那筆右邊的 `⋯` → **Redeploy**，讓剛剛加的環境變數生效。
 
