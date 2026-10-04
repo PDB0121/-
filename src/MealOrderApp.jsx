@@ -822,10 +822,22 @@ function AdminFormDetail({ form, users, balances, onBack, forms, saveForms, txs,
   const total = form.orders.reduce((s, o) => s + o.total, 0);
 
   // 打電話念的版本：一行一個品項，備註不同會分開列
+  // 同名稱的品項合併成一組先報總份數，底下再列各種備註各幾份（stats 已依名稱排序，同名會相鄰）
+  const nameGroups = [];
+  stats.forEach((s) => {
+    const last = nameGroups[nameGroups.length - 1];
+    if (last && last.name === s.name) { last.qty += s.qty; last.variants.push(s); }
+    else nameGroups.push({ name: s.name, qty: s.qty, variants: [s] });
+  });
+  const phoneLines = nameGroups.flatMap((g) => {
+    if (g.variants.length === 1 && !g.variants[0].note) return [`${g.name} ${g.qty} 份`];
+    return [`${g.name} 共 ${g.qty} 份`, ...g.variants.map((v) => `　${v.qty} 份：${v.note || "無備註"}`)];
+  });
+
   const phoneText = [
     `${form.title}　${form.date}`,
     "",
-    ...stats.map((s) => `${s.name}${s.note ? `（${s.note}）` : ""} ${s.qty} 份`),
+    ...phoneLines,
     "",
     `共 ${stats.reduce((n, s) => n + s.qty, 0)} 份，金額 ${money(total)}`,
   ].join("\n");
