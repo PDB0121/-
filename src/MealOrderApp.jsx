@@ -73,6 +73,30 @@ const today = () => new Date().toISOString().slice(0, 10);
 const money = (n) => (n < 0 ? "-" : "") + "NT$" + Math.abs(Math.round(n)).toLocaleString("en-US");
 const lineKey = (l) => `${l.name}||${(l.note || "").trim()}`;
 
+// 統計排序：名稱互相包含的品項（例如「碗粿」與「招牌碗粿」）排在一起，較短的在前；不合併，各自份數與備註照舊。
+// 單一個字的名稱不拿來比對，避免「茶」「飯」這種太短的字把不相干的品項串在一起。
+function sortStatsBySimilarName(list) {
+  const cmp = (a, b) => a.localeCompare(b, "zh-Hant");
+  const names = [...new Set(list.map((r) => r.name))];
+  const parent = new Map(names.map((n) => [n, n]));
+  const find = (n) => { while (parent.get(n) !== n) n = parent.get(n); return n; };
+  names.forEach((a) => names.forEach((b) => {
+    if (a !== b && a.length >= 2 && b.includes(a)) parent.set(find(b), find(a));
+  }));
+  const anchor = new Map();
+  names.forEach((n) => {
+    const root = find(n);
+    const cur = anchor.get(root);
+    if (!cur || n.length < cur.length || (n.length === cur.length && cmp(n, cur) < 0)) anchor.set(root, n);
+  });
+  const anchorOf = (n) => anchor.get(find(n));
+  return [...list].sort((x, y) =>
+    cmp(anchorOf(x.name), anchorOf(y.name)) ||
+    x.name.length - y.name.length ||
+    cmp(x.name, y.name) ||
+    cmp(x.note, y.note));
+}
+
 function useDebouncedSave(fn, delay = 400) {
   const t = useRef(null);
   return useCallback((...args) => {
@@ -814,7 +838,7 @@ function AdminFormDetail({ form, users, balances, onBack, forms, saveForms, txs,
         rec.who.push(`${o.userName}×${l.qty}`);
       });
     });
-    return [...m.values()].sort((a, b) => a.name.localeCompare(b.name, "zh-Hant") || a.note.localeCompare(b.note, "zh-Hant"));
+    return sortStatsBySimilarName([...m.values()]);
   }, [form]);
 
   if (!form) return <Empty icon={FileText} title="找不到這張表單" action={<Btn onClick={onBack}>返回</Btn>} />;
