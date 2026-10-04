@@ -825,6 +825,7 @@ function CreateForm({ open, onClose, onCreate }) {
 function AdminFormDetail({ form, users, balances, onBack, forms, saveForms, txs, saveTxs }) {
   const [view, setView] = useState("items");
   const [editingMenu, setEditingMenu] = useState(false);
+  const [editingOrder, setEditingOrder] = useState(null);
 
   // 品項統計：相同品項不同備註分開算
   const stats = useMemo(() => {
@@ -913,6 +914,28 @@ function AdminFormDetail({ form, users, balances, onBack, forms, saveForms, txs,
     const ok = await askConfirm({ title: "刪除這筆訂單？", body: "這個人就不算在這張表單裡了。", danger: true, confirmLabel: "刪除" });
     if (!ok) return;
     await saveForms(forms.map((f) => (f.id === form.id ? { ...f, orders: f.orders.filter((o) => o.id !== oid) } : f)));
+  };
+
+  // 儲存管理員對某筆訂單的修改。寫入前先抓最新資料，訂單已經結算、被取消、或剛被訂餐者改過就擋下來，
+  // 避免拿舊的畫面資料蓋掉別人的異動。
+  const saveOrderEdit = async (order, lines, orderNote) => {
+    const stop = (title, body) => { setEditingOrder(null); return askNotice(title, body); };
+    const fresh = await fetchState();
+    const f = fresh.forms.find((x) => x.id === form.id);
+    if (!f) return stop("找不到這張表單", "這張表單可能已經被刪除了，請返回重新整理。");
+    if (f.settled) return stop("表單已經結算", "已結算的表單不能再修改訂單。");
+    const o = f.orders.find((x) => x.id === order.id);
+    if (!o) return stop("找不到這筆訂單", "訂餐者可能剛剛取消了這筆訂單。");
+    if (`${o.updatedAt}|${o.adminEditedAt}` !== `${order.updatedAt}|${order.adminEditedAt}`) {
+      return stop("訂單剛被更新過", "這筆訂單在你編輯的同時又被異動了，請重新開啟再修改。");
+    }
+    const newLines = lines.map((l) => ({ name: l.name.trim(), price: Number(l.price) || 0, qty: l.qty, note: l.note.trim() }));
+    const updated = {
+      ...o, lines: newLines, total: newLines.reduce((s, l) => s + l.qty * l.price, 0),
+      note: orderNote, adminEditedAt: new Date().toISOString(),
+    };
+    await saveForms(fresh.forms.map((x) => (x.id === f.id ? { ...x, orders: x.orders.map((y) => (y.id === o.id ? updated : y)) } : x)));
+    setEditingOrder(null);
   };
 
   return (
@@ -1011,6 +1034,10 @@ function AdminFormDetail({ form, users, balances, onBack, forms, saveForms, txs,
           setEditingMenu(false);
         }} />
 
+      {editingOrder && (
+        <AdminOrderEditModal key={editingOrder.id} order={editingOrder} onClose={() => setEditingOrder(null)} onSave={saveOrderEdit} />
+      )}
+
       {view === "people" && (
         <Panel>
           {form.orders.length === 0 ? <Empty icon={Users} title="還沒有人填單" /> : (
@@ -1018,11 +1045,12 @@ function AdminFormDetail({ form, users, balances, onBack, forms, saveForms, txs,
               {form.orders.map((o) => (
                 <div key={o.id} className="flex gap-4 px-4 py-4">
                   <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2">
-                      <span className="font-medium">{o.userName}</span>
-                      <span className="text-xs text-stone-400 tabular-nums">
+                    <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                      <span className="whitespace-nowrap font-medium">{o.userName}</span>
+                      <span className="whitespace-nowrap text-xs text-stone-400 tabular-nums">
                         目前餘額 {money(balances[o.userId] || 0)}
                       </span>
+                      {o.adminEditedAt && <span className="whitespace-nowrap rounded mo-badge px-1.5 py-0.5 text-xs">管理員已修改</span>}
                     </div>
                     <ul className="mt-1.5 space-y-0.5 text-sm text-stone-600">
                       {o.lines.map((l, i) => (
@@ -1038,7 +1066,10 @@ function AdminFormDetail({ form, users, balances, onBack, forms, saveForms, txs,
                   <div className="text-right">
                     <p className="text-lg font-semibold tabular-nums">{money(o.total)}</p>
                     {!form.settled && (
-                      <button onClick={() => removeOrder(o.id)} className="mt-1 text-xs text-stone-400 hover:text-red-800">刪除</button>
+                      <div className="mt-1 flex justify-end gap-3">
+                        <button onClick={() => setEditingOrder(o)} className="text-xs text-stone-500 hover:text-stone-900">編輯</button>
+                        <button onClick={() => removeOrder(o.id)} className="text-xs text-stone-400 hover:text-red-800">刪除</button>
+                      </div>
                     )}
                   </div>
                 </div>
@@ -1048,6 +1079,84 @@ function AdminFormDetail({ form, users, balances, onBack, forms, saveForms, txs,
         </Panel>
       )}
     </div>
+  );
+}
+
+/* 管理員修改某位成員已送出的訂單：品項名稱、單價、數量、備註都能改，也能加減品項 */
+function AdminOrderEditModal({ order, onClose, onSave }) {
+  const [lines, setLines] = useState(() => order.lines.map((l) => ({
+    id: uid(), name: l.name, price: String(l.price ?? 0), qty: l.qty, note: l.note || "",
+  })));
+  const [note, setNote] = useState(order.note || "");
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const patch = (id, p) => { setErr(""); setLines((ls) => ls.map((l) => (l.id === id ? { ...l, ...p } : l))); };
+  const drop = (id) => setLines((ls) => ls.filter((l) => l.id !== id));
+  const add = () => setLines((ls) => [...ls, { id: uid(), name: "", price: "", qty: 1, note: "" }]);
+  const sum = (l) => (Number(l.price) || 0) * l.qty;
+  const total = lines.reduce((s, l) => s + sum(l), 0);
+
+  const submit = async () => {
+    if (lines.length === 0) return setErr("至少要保留一個品項；要整筆刪除請回到列表按「刪除」。");
+    if (lines.some((l) => !l.name.trim())) return setErr("有品項還沒填名稱。");
+    setErr(""); setBusy(true);
+    await onSave(order, lines, note.trim());
+    setBusy(false);
+  };
+
+  return (
+    <Modal open onClose={onClose} title={`修改 ${order.userName} 的訂單`} wide>
+      <div className="max-h-96 space-y-2 overflow-y-auto pr-1">
+        {lines.map((l) => (
+          <div key={l.id} className="rounded-lg border border-stone-200 p-2.5">
+            <div className="flex items-center gap-2">
+              <input className={inputCls + " min-w-0 flex-1 font-medium"} value={l.name} placeholder="品項名稱"
+                onChange={(e) => patch(l.id, { name: e.target.value })} />
+              <button onClick={() => drop(l.id)} title="刪除這一項"
+                className="shrink-0 rounded-lg px-2 py-2 text-stone-400 hover:bg-red-50 hover:text-red-800"><Trash2 size={16} /></button>
+            </div>
+            <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-2">
+              <label className="flex items-center gap-2">
+                <span className="shrink-0 whitespace-nowrap text-xs text-stone-500">單價</span>
+                <input className={inputCls + " w-24 tabular-nums"} inputMode="decimal" value={l.price} placeholder="0"
+                  onFocus={(e) => e.target.select()}
+                  onChange={(e) => patch(l.id, { price: e.target.value.replace(/[^0-9.]/g, "") })} />
+              </label>
+              <div className="flex items-center gap-1">
+                <span className="mr-1 shrink-0 whitespace-nowrap text-xs text-stone-500">數量</span>
+                <button onClick={() => patch(l.id, { qty: Math.max(1, l.qty - 1) })}
+                  className="rounded-md border border-stone-300 p-1.5 hover:bg-stone-100"><Minus size={13} /></button>
+                <span className="w-7 text-center tabular-nums font-semibold">{l.qty}</span>
+                <button onClick={() => patch(l.id, { qty: l.qty + 1 })}
+                  className="rounded-md border border-stone-300 p-1.5 hover:bg-stone-100"><Plus size={13} /></button>
+              </div>
+              <span className="ml-auto text-sm font-semibold tabular-nums">{money(sum(l))}</span>
+            </div>
+            <input className={inputCls + " mt-2"} value={l.note} placeholder="備註，例如：不要香菜、飯少、加辣"
+              onChange={(e) => patch(l.id, { note: e.target.value })} />
+          </div>
+        ))}
+      </div>
+      <div className="mt-2"><Btn size="sm" variant="quiet" onClick={add}><Plus size={14} />新增一項</Btn></div>
+
+      <div className="mt-4">
+        <Field label="整單備註（可留空）">
+          <input className={inputCls} value={note} onChange={(e) => setNote(e.target.value)} />
+        </Field>
+      </div>
+
+      <p className="mt-4 rounded-lg bg-stone-50 px-3 py-2.5 text-sm text-stone-600 tabular-nums">
+        原本 {money(order.total)} → 修改後 <span className="font-semibold mo-text-strong">{money(total)}</span>
+      </p>
+      {err && <p className="mt-3 text-sm text-red-800">{err}</p>}
+      <p className="mt-3 text-xs text-stone-500">儲存後這位成員的訂單會標示「管理員已修改」，結算時以修改後的金額扣款。</p>
+
+      <div className="mt-5 flex justify-end gap-2">
+        <Btn variant="quiet" onClick={onClose}>取消</Btn>
+        <Btn disabled={busy} onClick={submit}>{busy ? "儲存中…" : "儲存修改"}</Btn>
+      </div>
+    </Modal>
   );
 }
 
@@ -1581,6 +1690,8 @@ function OrderEditor({ form, me, forms, saveForms, onBack, balance }) {
   const [note, setNote] = useState(existing ? existing.note || "" : "");
   const [custom, setCustom] = useState({ name: "", price: "" });
   const [saved, setSaved] = useState(false);
+  // 畫面上的餐點是進來時的版本；記下當時管理員修改的時間，送出時發現又被改過就擋下來，免得蓋掉管理員的修改
+  const loadedAdminEdit = useRef(existing ? existing.adminEditedAt || "" : "");
 
   if (!form) return <Empty icon={FileText} title="找不到這張表單" action={<Btn onClick={onBack}>返回</Btn>} />;
 
@@ -1611,6 +1722,10 @@ function OrderEditor({ form, me, forms, saveForms, onBack, balance }) {
         freshForm.settled ? "管理員剛好已經完成結算，這筆訂單沒有送出，請直接找管理員處理。" : "要補點請找管理員，這筆訂單沒有送出。"
       );
     }
+    const freshMine = freshForm.orders.find((o) => o.userId === me.id);
+    if (freshMine && (freshMine.adminEditedAt || "") !== loadedAdminEdit.current) {
+      return askNotice("管理員剛修改過你的訂單", "這次沒有送出，避免蓋掉管理員的修改。請按「所有表單」返回，再重新進來確認內容。");
+    }
     const order = {
       id: existing ? existing.id : uid(),
       userId: me.id, userName: me.name,
@@ -1623,6 +1738,7 @@ function OrderEditor({ form, me, forms, saveForms, onBack, balance }) {
       return { ...f, orders: [...others, order] };
     });
     await saveForms(next);
+    loadedAdminEdit.current = "";
     setSaved(true);
   };
 
@@ -1648,6 +1764,9 @@ function OrderEditor({ form, me, forms, saveForms, onBack, balance }) {
           <p className="mt-3 rounded-lg mo-badge px-3 py-2.5 text-sm">
             {form.settled ? "這張表單已結算，無法再更改。" : "已經截止收單了，要補點請找管理員。"}
           </p>
+        )}
+        {loadedAdminEdit.current && (
+          <p className="mt-3 rounded-lg mo-badge px-3 py-2.5 text-sm">管理員調整過你的訂單內容，下方是調整後的版本。</p>
         )}
       </div>
 
