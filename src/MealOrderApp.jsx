@@ -8,7 +8,28 @@ import {
 /* ---------------- storage ----------------
    資料存在後端（Vercel KV），所有使用者共用同一份，透過 /api/state 讀寫。 */
 const API_BASE = "/api";
-const DEFAULT_STATE = { users: [], forms: [], tx: [], cfg: { pin: "0000", title: "今天吃什麼" } };
+const DEFAULT_STATE = { users: [], forms: [], tx: [], cfg: { title: "今天吃什麼" } };
+const TOKEN_KEY = "meal_order_admin_token";
+
+const getToken = () => { try { return localStorage.getItem(TOKEN_KEY) || undefined; } catch (e) { return undefined; } };
+const setToken = (t) => { try { if (t) localStorage.setItem(TOKEN_KEY, t); else localStorage.removeItem(TOKEN_KEY); } catch (e) { /* 無痕模式等情況存不了就算了 */ } };
+
+// 密碼只在伺服器端比對，瀏覽器只拿到一張登入憑證
+async function adminLogin(pin) {
+  try {
+    const res = await fetch(`${API_BASE}/admin-login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pin }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.token) return { ok: false, error: data.error || "密碼不對" };
+    setToken(data.token);
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: "連線失敗，請稍後再試" };
+  }
+}
 
 async function fetchState() {
   try {
@@ -26,8 +47,19 @@ async function saveState(key, value) {
     const res = await fetch(`${API_BASE}/state`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ key, value }),
+      body: JSON.stringify({ key, value, token: getToken() }),
     });
+    if (res.status === 401) {
+      // 登入憑證過期或無效：畫面上的改動其實沒有存進去，重新載入讓畫面回到伺服器上的實際內容
+      setToken(null);
+      await askNotice("登入已過期", "剛剛的改動沒有儲存成功，請重新登入管理員後再操作一次。");
+      window.location.reload();
+      return false;
+    }
+    if (res.ok) {
+      const data = await res.json().catch(() => ({}));
+      if (data.token) setToken(data.token);
+    }
     return res.ok;
   } catch (e) {
     console.error("儲存失敗", key, e);
@@ -367,7 +399,7 @@ export default function MealOrderApp() {
   const [users, setUsers] = useState([]);
   const [forms, setForms] = useState([]);
   const [txs, setTxs] = useState([]);
-  const [cfg, setCfg] = useState({ pin: "0000", title: "今天吃什麼" });
+  const [cfg, setCfg] = useState({ title: "今天吃什麼" });
 
   const [role, setRole] = useState(null);       // 'admin' | 'user'
   const [meId, setMeId] = useState(null);
@@ -405,7 +437,7 @@ export default function MealOrderApp() {
   const saveUsers = async (next) => { setUsers(next); await saveState("users", next); };
   const saveForms = async (next) => { setForms(next); await saveState("forms", next); };
   const saveTxs = async (next) => { setTxs(next); await saveState("tx", next); };
-  const saveCfg = async (next) => { setCfg(next); await saveState("cfg", next); };
+  const saveCfg = async (next) => { setCfg({ title: next.title }); await saveState("cfg", next); };
 
   const balances = useMemo(() => {
     const m = {};
@@ -451,7 +483,7 @@ export default function MealOrderApp() {
   ];
   const nav = role === "admin" ? navAdmin : navUser;
 
-  const exit = () => { setRole(null); setMeId(null); setOpenFormId(null); };
+  const exit = () => { setToken(null); setRole(null); setMeId(null); setOpenFormId(null); };
 
   return (
     <div className="min-h-screen mo-bg-page pb-20 text-stone-900 sm:pb-0">
@@ -532,9 +564,18 @@ function Gate({ users, cfg, onAdmin, onUser }) {
   const [mode, setMode] = useState(null);
   const [pin, setPin] = useState("");
   const [err, setErr] = useState("");
+  const [checking, setChecking] = useState(false);
   const [q, setQ] = useState("");
 
   const list = users.filter((u) => u.name.includes(q));
+
+  const tryAdminLogin = async () => {
+    if (checking) return;
+    setErr(""); setChecking(true);
+    const r = await adminLogin(pin);
+    setChecking(false);
+    if (r.ok) onAdmin(); else setErr(r.error);
+  };
 
   return (
     <div className="min-h-screen mo-bg-solid px-5 py-14">
@@ -575,13 +616,13 @@ function Gate({ users, cfg, onAdmin, onUser }) {
             <Field label="管理員密碼">
               <input className={inputCls} type="password" value={pin} autoFocus
                 onChange={(e) => { setPin(e.target.value); setErr(""); }}
-                onKeyDown={(e) => { if (e.key === "Enter") { pin === (cfg.pin || "0000") ? onAdmin() : setErr("密碼不對，預設是 0000"); } }}
-                placeholder="預設 0000" />
+                onKeyDown={(e) => { if (e.key === "Enter") tryAdminLogin(); }}
+                placeholder="輸入管理員密碼" />
             </Field>
             {err && <p className="mt-2 text-sm text-red-800">{err}</p>}
             <div className="mt-4 flex gap-2">
               <Btn variant="quiet" onClick={() => setMode(null)}>返回</Btn>
-              <Btn className="flex-1" onClick={() => (pin === (cfg.pin || "0000") ? onAdmin() : setErr("密碼不對，預設是 0000"))}>進入管理</Btn>
+              <Btn className="flex-1" disabled={checking} onClick={tryAdminLogin}>{checking ? "確認中…" : "進入管理"}</Btn>
             </div>
           </div>
         )}
@@ -1398,19 +1439,33 @@ function LedgerTable({ rows, showName }) {
 /* ---------------- 設定 ---------------- */
 function SettingsPane({ cfg, saveCfg, onWipe }) {
   const [title, setTitle] = useState(cfg.title || "今天吃什麼");
-  const [pin, setPin] = useState(cfg.pin || "0000");
+  const [pin, setPin] = useState("");
+  const [err, setErr] = useState("");
   const [saved, setSaved] = useState(false);
+
+  const save = async () => {
+    const newPin = pin.trim();
+    if (newPin && newPin.length < 4) return setErr("密碼至少 4 個字元");
+    setErr("");
+    const payload = { title: title.trim() || "今天吃什麼" };
+    if (newPin) payload.pin = newPin;
+    await saveCfg(payload);
+    setPin("");
+    setSaved(true);
+  };
 
   return (
     <div className="max-w-lg">
       <h2 className="mb-5 text-xl font-semibold tracking-tight">設定</h2>
       <Panel className="space-y-4 p-5">
         <Field label="網站名稱"><input className={inputCls} value={title} onChange={(e) => { setTitle(e.target.value); setSaved(false); }} /></Field>
-        <Field label="管理員密碼" hint="訂餐者不需要密碼，只有管理端要。">
-          <input className={inputCls} value={pin} onChange={(e) => { setPin(e.target.value); setSaved(false); }} />
+        <Field label="管理員密碼" hint="訂餐者不需要密碼，只有管理端要。基於安全考量不會顯示目前的密碼；留空表示不更改，輸入新密碼（至少 4 個字元）才會更換。">
+          <input className={inputCls} type="password" autoComplete="new-password" value={pin} placeholder="輸入新密碼才會更換"
+            onChange={(e) => { setPin(e.target.value); setErr(""); setSaved(false); }} />
         </Field>
+        {err && <p className="text-sm text-red-800">{err}</p>}
         <div className="flex items-center gap-3">
-          <Btn onClick={async () => { await saveCfg({ ...cfg, title: title.trim() || "今天吃什麼", pin: pin || "0000" }); setSaved(true); }}>儲存設定</Btn>
+          <Btn onClick={save}>儲存設定</Btn>
           {saved && <span className="flex items-center gap-1 text-sm mo-text-strong"><Check size={15} />已儲存</span>}
         </div>
       </Panel>

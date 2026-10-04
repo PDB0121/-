@@ -1,4 +1,5 @@
-import { Redis } from "@upstash/redis";
+import { getRedis } from "./_lib/redis.js";
+import { verifyAdminToken, signAdminToken, revokeAllAdminTokens } from "./_lib/auth.js";
 
 const KEYS = ["users", "forms", "tx", "cfg"];
 const DEFAULTS = {
@@ -7,21 +8,8 @@ const DEFAULTS = {
   tx: [],
   cfg: { pin: "0000", title: "今天吃什麼" },
 };
-
-// Vercel 的 Marketplace Redis 整合（Upstash）用不同名稱注入環境變數，
-// 依接的是哪個整合而定，這裡把常見的幾種都試一遍。
-function getRedis() {
-  const url =
-    process.env.KV_REST_API_URL ||
-    process.env.UPSTASH_REDIS_REST_URL ||
-    process.env.REDIS_REST_URL;
-  const token =
-    process.env.KV_REST_API_TOKEN ||
-    process.env.UPSTASH_REDIS_REST_TOKEN ||
-    process.env.REDIS_REST_TOKEN;
-  if (!url || !token) return null;
-  return new Redis({ url, token });
-}
+// 訂餐者填單只會動到 forms；成員、儲值、交易、設定都是管理員專屬操作
+const ADMIN_ONLY_KEYS = new Set(["users", "tx", "cfg"]);
 
 export default async function handler(req, res) {
   const redis = getRedis();
@@ -39,17 +27,45 @@ export default async function handler(req, res) {
       const values = await Promise.all(KEYS.map((k) => redis.get(k)));
       const state = {};
       KEYS.forEach((k, i) => { state[k] = values[i] ?? DEFAULTS[k]; });
+      // 管理員密碼只存在伺服器端，絕對不回傳給瀏覽器
+      const { pin, ...publicCfg } = state.cfg || {};
+      state.cfg = publicCfg;
       res.status(200).json(state);
       return;
     }
 
     if (req.method === "POST") {
-      const { key, value } = req.body || {};
+      const { key, value, token } = req.body || {};
       if (!KEYS.includes(key)) {
         res.status(400).json({ error: "無效的 key" });
         return;
       }
-      await redis.set(key, value);
+
+      if (ADMIN_ONLY_KEYS.has(key) && !(await verifyAdminToken(redis, token))) {
+        res.status(401).json({ error: "需要管理員登入" });
+        return;
+      }
+
+      if (key === "cfg") {
+        // 瀏覽器端不知道目前的密碼，所以這裡合併而不是整包覆蓋：沒帶 pin 就保留原本的
+        const current = (await redis.get("cfg")) || DEFAULTS.cfg;
+        const next = { ...current, ...value };
+        const pinChanged = typeof value?.pin === "string" && value.pin !== String(current.pin || "0000");
+        if (pinChanged && value.pin.length < 4) {
+          res.status(400).json({ error: "密碼至少 4 個字元" });
+          return;
+        }
+        if (!pinChanged) next.pin = current.pin;
+        await redis.set("cfg", next);
+        if (pinChanged) {
+          // 換密碼時讓所有舊的登入憑證失效（密碼外流後換掉，之前登入過的人也要被踢掉），並發一張新的給目前這位管理員
+          await revokeAllAdminTokens(redis);
+          res.status(200).json({ ok: true, token: await signAdminToken(redis) });
+          return;
+        }
+      } else {
+        await redis.set(key, value);
+      }
       res.status(200).json({ ok: true });
       return;
     }
