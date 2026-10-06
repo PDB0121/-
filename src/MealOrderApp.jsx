@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useRef, useCallback } from "react"
 import {
   Utensils, Users, Wallet, Receipt, Shield, User, RefreshCw, Plus, Minus,
   Trash2, Check, X, ChevronLeft, Upload, Loader2, ClipboardList, Calendar,
-  Lock, LogOut, Settings, Search, FileText, ImageIcon, CircleDollarSign, Copy, Download, Edit3,
+  Lock, LogOut, Settings, Search, FileText, ImageIcon, CircleDollarSign, Copy, Download, Edit3, Clock,
 } from "lucide-react";
 
 /* ---------------- storage ----------------
@@ -31,10 +31,17 @@ async function adminLogin(pin) {
   }
 }
 
+// 截止時間以伺服器的時間為準：每次讀資料時用回應的 Date 標頭算出「伺服器時間 - 本機時間」的差，
+// 這樣就算訂餐者的手機時鐘不準，也不會提早或延後被鎖定。
+let clockOffset = 0;
+const serverNow = () => Date.now() + clockOffset;
+
 async function fetchState() {
   try {
-    const res = await fetch(`${API_BASE}/state`);
+    const res = await fetch(`${API_BASE}/state`, { cache: "no-store" });
     if (!res.ok) throw new Error("讀取失敗 " + res.status);
+    const serverDate = Date.parse(res.headers.get("date") || "");
+    if (!Number.isNaN(serverDate)) clockOffset = serverDate - Date.now();
     const data = await res.json();
     return { ...DEFAULT_STATE, ...data };
   } catch (e) {
@@ -72,6 +79,49 @@ const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(
 const today = () => new Date().toISOString().slice(0, 10);
 const money = (n) => (n < 0 ? "-" : "") + "NT$" + Math.abs(Math.round(n)).toLocaleString("en-US");
 const lineKey = (l) => `${l.name}||${(l.note || "").trim()}`;
+
+/* ---------------- 表單截止時間 ---------------- */
+const deadlinePassed = (f, now) => !!f.deadline && now >= Date.parse(f.deadline);
+const formClosed = (f, now) => !!f.closed || deadlinePassed(f, now);
+
+// 每秒更新一次的「現在時間」（伺服器時間），讓截止時間一到畫面就自動鎖定
+function useNow() {
+  const [now, setNow] = useState(serverNow);
+  useEffect(() => {
+    const i = setInterval(() => setNow(serverNow()), 1000);
+    return () => clearInterval(i);
+  }, []);
+  return now;
+}
+
+const fmtDeadline = (iso) => new Date(iso).toLocaleString("zh-TW", {
+  month: "numeric", day: "numeric", weekday: "short", hour: "2-digit", minute: "2-digit", hour12: false,
+});
+
+function fmtRemaining(ms) {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60);
+  if (d > 0) return `${d} 天 ${h} 小時`;
+  if (h > 0) return `${h} 小時 ${m} 分`;
+  return `${m} 分 ${s % 60} 秒`;
+}
+
+// <input type="datetime-local"> 要的是本地時間的 "YYYY-MM-DDTHH:mm"
+const toLocalInput = (ms) => {
+  const d = new Date(ms);
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+};
+
+// 只改動這一張表單：先抓最新資料再改，避免拿畫面上可能過期的整包資料蓋掉別人剛送出的訂單
+async function updateFormFresh(saveForms, formId, mutate) {
+  const fresh = await fetchState();
+  const f = fresh.forms.find((x) => x.id === formId);
+  if (!f) { await askNotice("找不到這張表單", "這張表單可能已經被刪除了，請返回重新整理。"); return false; }
+  if (f.settled) { await askNotice("表單已經結算", "已結算的表單不能再更改。"); return false; }
+  await saveForms(fresh.forms.map((x) => (x.id === formId ? mutate(x) : x)));
+  return true;
+}
 
 // 統計排序：名稱互相包含的品項（例如「碗粿」與「招牌碗粿」）排在一起，較短的在前；不合併，各自份數與備註照舊。
 // 單一個字的名稱不拿來比對，避免「茶」「飯」這種太短的字把不相干的品項串在一起。
@@ -689,6 +739,7 @@ function Gate({ users, cfg, onAdmin, onUser }) {
 /* ---------------- 管理員：表單列表 ---------------- */
 function AdminForms({ forms, saveForms, onOpen }) {
   const [creating, setCreating] = useState(false);
+  const now = useNow();
   const sorted = [...forms].sort((a, b) => (b.date + b.createdAt).localeCompare(a.date + a.createdAt));
 
   const remove = async (id) => {
@@ -709,8 +760,8 @@ function AdminForms({ forms, saveForms, onOpen }) {
 
       {sorted.length === 0 ? (
         <Panel><Empty icon={ClipboardList} title="還沒有表單"
-          hint="上傳一張菜單照片，系統會讀出品項和價格，直接變成可以填的訂餐表單。"
-          action={<Btn onClick={() => setCreating(true)}><Upload size={16} />上傳菜單建立表單</Btn>} /></Panel>
+          hint="建立一張表單，可以附上菜單照片給大家對照，也可以設定截止時間。"
+          action={<Btn onClick={() => setCreating(true)}><Plus size={16} />新增表單</Btn>} /></Panel>
       ) : (
         <div className="space-y-3">
           {sorted.map((f) => {
@@ -723,13 +774,18 @@ function AdminForms({ forms, saveForms, onOpen }) {
                       <span className="truncate text-base font-semibold text-stone-900">{f.title}</span>
                       {f.settled
                         ? <span className="shrink-0 rounded-md bg-stone-100 px-2 py-0.5 text-xs text-stone-500">已結算</span>
-                        : f.closed
+                        : formClosed(f, now)
                           ? <span className="shrink-0 rounded-md bg-stone-200 px-2 py-0.5 text-xs text-stone-600">已截止</span>
                           : <span className="shrink-0 rounded-md mo-chip-solid px-2 py-0.5 text-xs">收單中</span>}
                     </div>
                     <p className="mt-1 text-sm text-stone-500 tabular-nums">
                       {f.date}　{f.orders.length} 人已填　合計 {money(total)}
                     </p>
+                    {f.deadline && !f.settled && (
+                      <p className="mt-0.5 text-xs text-stone-400">
+                        截止 {fmtDeadline(f.deadline)}{!formClosed(f, now) && `（剩 ${fmtRemaining(Date.parse(f.deadline) - now)}）`}
+                      </p>
+                    )}
                   </button>
                   <Btn size="sm" variant="quiet" onClick={() => onOpen(f.id)}>查看</Btn>
                   <button onClick={() => remove(f.id)} className="rounded-lg p-2 text-stone-400 hover:bg-red-50 hover:text-red-800"><Trash2 size={16} /></button>
@@ -747,10 +803,36 @@ function AdminForms({ forms, saveForms, onOpen }) {
   );
 }
 
+/* 截止時間輸入：日期時間欄位加幾個常用的「幾分鐘後」快速按鈕 */
+function DeadlineField({ value, onChange }) {
+  const after = (min) => onChange(toLocalInput(serverNow() + min * 60000));
+  return (
+    <div>
+      <input type="datetime-local" className={inputCls} value={value} onChange={(e) => onChange(e.target.value)} />
+      <div className="mt-2 flex flex-wrap gap-2">
+        <Btn size="sm" variant="quiet" onClick={() => after(30)}>30 分鐘後</Btn>
+        <Btn size="sm" variant="quiet" onClick={() => after(60)}>1 小時後</Btn>
+        <Btn size="sm" variant="quiet" onClick={() => after(120)}>2 小時後</Btn>
+        {value && <Btn size="sm" variant="ghost" onClick={() => onChange("")}>清除</Btn>}
+      </div>
+    </div>
+  );
+}
+
+// 把欄位的值轉成 ISO 字串；沒填回傳 null；時間不合法或已經過了回傳 { error }
+function parseDeadline(value) {
+  if (!value) return { iso: null };
+  const t = new Date(value).getTime();
+  if (Number.isNaN(t)) return { error: "截止時間格式不對。" };
+  if (t <= serverNow()) return { error: "這個時間已經過了，請設定之後的時間，或清除不設定。" };
+  return { iso: new Date(t).toISOString() };
+}
+
 /* ---------------- 建立表單 ---------------- */
 function CreateForm({ open, onClose, onCreate }) {
   const [title, setTitle] = useState("");
   const [date, setDate] = useState(today());
+  const [deadline, setDeadline] = useState("");
   const [items, setItems] = useState([]);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
@@ -758,7 +840,7 @@ function CreateForm({ open, onClose, onCreate }) {
   const fileRef = useRef(null);
 
   useEffect(() => {
-    if (open) { setTitle(""); setDate(today()); setItems([]); setErr(""); setPreview(null); }
+    if (open) { setTitle(""); setDate(today()); setDeadline(""); setItems([]); setErr(""); setPreview(null); }
   }, [open]);
 
   const onFile = async (e) => {
@@ -783,11 +865,13 @@ function CreateForm({ open, onClose, onCreate }) {
   };
 
   const create = () => {
+    const d = parseDeadline(deadline);
+    if (d.error) return setErr(d.error);
     const clean = items.filter((i) => i.name.trim());
     onCreate({
       id: uid(), title: title.trim() || date, date, createdAt: new Date().toISOString(),
       items: clean.map((i) => ({ ...i, name: i.name.trim(), price: Number(i.price) || 0 })),
-      orders: [], closed: false, settled: false, menuImage: preview || null,
+      orders: [], closed: false, settled: false, menuImage: preview || null, deadline: d.iso,
     });
   };
 
@@ -796,6 +880,12 @@ function CreateForm({ open, onClose, onCreate }) {
       <div className="grid gap-4 sm:grid-cols-2">
         <Field label="表單名稱"><input className={inputCls} value={title} onChange={(e) => setTitle(e.target.value)} placeholder="例如：阿姨自助餐" /></Field>
         <Field label="訂餐日期"><input type="date" className={inputCls} value={date} onChange={(e) => setDate(e.target.value)} /></Field>
+      </div>
+
+      <div className="mt-4">
+        <span className="mb-1.5 block text-sm font-medium text-stone-700">截止時間（可留空）</span>
+        <DeadlineField value={deadline} onChange={(v) => { setDeadline(v); setErr(""); }} />
+        <span className="mt-1 block text-xs text-stone-500">時間一到，訂餐者就不能再填或修改，不用手動按「停止收單」。</span>
       </div>
 
       <div className="mt-5 rounded-xl border border-dashed border-stone-300 bg-stone-50 p-5 text-center">
@@ -826,6 +916,8 @@ function AdminFormDetail({ form, users, balances, onBack, forms, saveForms, txs,
   const [view, setView] = useState("items");
   const [editingMenu, setEditingMenu] = useState(false);
   const [editingOrder, setEditingOrder] = useState(null);
+  const [settingDeadline, setSettingDeadline] = useState(false);
+  const now = useNow();
 
   // 品項統計：相同品項不同備註分開算
   const stats = useMemo(() => {
@@ -875,8 +967,29 @@ function AdminFormDetail({ form, users, balances, onBack, forms, saveForms, txs,
   const statsTsv = statsRows.map((r) => r.join("\t")).join("\n");
   const statsCsv = toCsv(statsRows);
 
+  const isClosed = formClosed(form, now);
+  const isPastDeadline = deadlinePassed(form, now);
+
   const toggleClosed = async () => {
-    await saveForms(forms.map((f) => (f.id === form.id ? { ...f, closed: !f.closed } : f)));
+    if (!isClosed) {
+      await updateFormFresh(saveForms, form.id, (f) => ({ ...f, closed: true }));
+      return;
+    }
+    if (isPastDeadline) {
+      const ok = await askConfirm({
+        title: "重新開放填單？",
+        body: "截止時間已經過了，重新開放會清除原本的截止時間，之後可以再設定新的。",
+        confirmLabel: "重新開放",
+      });
+      if (!ok) return;
+    }
+    // 截止時間已過就一併清掉，不然重新開放後馬上又被鎖住
+    await updateFormFresh(saveForms, form.id, (f) => ({ ...f, closed: false, deadline: deadlinePassed(f, serverNow()) ? null : f.deadline }));
+  };
+
+  const saveDeadline = async (iso) => {
+    setSettingDeadline(false);
+    await updateFormFresh(saveForms, form.id, (f) => ({ ...f, deadline: iso }));
   };
 
   const settle = async () => {
@@ -952,6 +1065,15 @@ function AdminFormDetail({ form, users, balances, onBack, forms, saveForms, txs,
           <div className="min-w-0 flex-1">
             <h2 className="text-xl font-semibold tracking-tight">{form.title}</h2>
             <p className="mt-1 text-sm text-stone-500 tabular-nums">{form.date}　{form.orders.length} 人已填</p>
+            {!form.settled && (form.closed || form.deadline) && (
+              <p className="mt-0.5 text-sm text-stone-500">
+                {form.closed
+                  ? "已手動停止收單"
+                  : isPastDeadline
+                    ? `已於 ${fmtDeadline(form.deadline)} 截止`
+                    : `截止 ${fmtDeadline(form.deadline)}（剩 ${fmtRemaining(Date.parse(form.deadline) - now)}）`}
+              </p>
+            )}
           </div>
           <div className="text-right">
             <p className="text-3xl font-semibold tabular-nums mo-text-strong">{money(total)}</p>
@@ -959,7 +1081,8 @@ function AdminFormDetail({ form, users, balances, onBack, forms, saveForms, txs,
           </div>
         </div>
         <div className="mt-4 flex flex-wrap gap-2">
-          {!form.settled && <Btn variant="quiet" size="sm" onClick={toggleClosed}>{form.closed ? "重新開放填單" : "停止收單"}</Btn>}
+          {!form.settled && <Btn variant="quiet" size="sm" onClick={toggleClosed}>{isClosed ? "重新開放填單" : "停止收單"}</Btn>}
+          {!form.settled && <Btn variant="quiet" size="sm" onClick={() => setSettingDeadline(true)}><Clock size={14} />{form.deadline ? "修改截止時間" : "設定截止時間"}</Btn>}
           {!form.settled && <Btn variant="quiet" size="sm" onClick={() => setEditingMenu(true)}><Edit3 size={14} />編輯品項</Btn>}
           {form.settled
             ? <span className="inline-flex items-center gap-1.5 rounded-lg bg-stone-100 px-3 py-1.5 text-sm text-stone-600"><Check size={14} />已於 {form.settledAt?.slice(0, 10)} 完成扣款</span>
@@ -1038,6 +1161,10 @@ function AdminFormDetail({ form, users, balances, onBack, forms, saveForms, txs,
         <AdminOrderEditModal key={editingOrder.id} order={editingOrder} onClose={() => setEditingOrder(null)} onSave={saveOrderEdit} />
       )}
 
+      {settingDeadline && (
+        <DeadlineModal form={form} onClose={() => setSettingDeadline(false)} onSave={saveDeadline} />
+      )}
+
       {view === "people" && (
         <Panel>
           {form.orders.length === 0 ? <Empty icon={Users} title="還沒有人填單" /> : (
@@ -1079,6 +1206,35 @@ function AdminFormDetail({ form, users, balances, onBack, forms, saveForms, txs,
         </Panel>
       )}
     </div>
+  );
+}
+
+/* 設定或修改表單的截止時間（留空儲存 = 不設定） */
+function DeadlineModal({ form, onClose, onSave }) {
+  const [value, setValue] = useState(() => (form.deadline ? toLocalInput(Date.parse(form.deadline)) : ""));
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const submit = async () => {
+    const d = parseDeadline(value);
+    if (d.error) return setErr(d.error);
+    setBusy(true);
+    await onSave(d.iso);
+  };
+
+  return (
+    <Modal open onClose={onClose} title="表單截止時間">
+      <p className="mb-3 text-sm text-stone-500">時間一到，訂餐者就不能再填或修改這張表單。留空並儲存代表不設定截止時間。</p>
+      <DeadlineField value={value} onChange={(v) => { setValue(v); setErr(""); }} />
+      {form.closed && (
+        <p className="mt-3 rounded-lg mo-badge px-3 py-2 text-sm">這張表單目前是手動停止收單的狀態，設定截止時間不會重新開放；要開放請先按「重新開放填單」。</p>
+      )}
+      {err && <p className="mt-3 text-sm text-red-800">{err}</p>}
+      <div className="mt-5 flex justify-end gap-2">
+        <Btn variant="quiet" onClick={onClose}>取消</Btn>
+        <Btn disabled={busy} onClick={submit}>{busy ? "儲存中…" : "儲存"}</Btn>
+      </div>
+    </Modal>
   );
 }
 
@@ -1628,6 +1784,7 @@ function SettingsPane({ cfg, saveCfg, onWipe }) {
 
 /* ---------------- 訂餐者：表單列表 ---------------- */
 function UserForms({ forms, me, onOpen }) {
+  const now = useNow();
   const open = forms.filter((f) => !f.settled).sort((a, b) => b.date.localeCompare(a.date));
   const done = forms.filter((f) => f.settled).sort((a, b) => b.date.localeCompare(a.date)).slice(0, 5);
 
@@ -1649,13 +1806,18 @@ function UserForms({ forms, me, onOpen }) {
                 className="block w-full rounded-xl border border-stone-200 bg-white p-4 text-left mo-hover-border">
                 <div className="flex items-center gap-2">
                   <span className="flex-1 truncate text-base font-semibold">{f.title}</span>
-                  {f.closed
+                  {formClosed(f, now)
                     ? <span className="rounded-md bg-stone-200 px-2 py-0.5 text-xs text-stone-600">已截止</span>
                     : o
                       ? <span className="rounded-md bg-stone-200 px-2 py-0.5 text-xs text-stone-700">已填 {money(o.total)}</span>
                       : <span className="rounded-md mo-btn-accent px-2 py-0.5 text-xs font-medium">還沒填</span>}
                 </div>
                 <p className="mt-1 text-sm text-stone-500 tabular-nums">{f.date}　{f.items.length} 個品項</p>
+                {f.deadline && (
+                  <p className="mt-0.5 text-xs text-stone-400">
+                    {formClosed(f, now) ? `截止時間 ${fmtDeadline(f.deadline)}` : `${fmtDeadline(f.deadline)} 截止（剩 ${fmtRemaining(Date.parse(f.deadline) - now)}）`}
+                  </p>
+                )}
               </button>
             );
           })}
@@ -1692,10 +1854,12 @@ function OrderEditor({ form, me, forms, saveForms, onBack, balance }) {
   const [saved, setSaved] = useState(false);
   // 畫面上的餐點是進來時的版本；記下當時管理員修改的時間，送出時發現又被改過就擋下來，免得蓋掉管理員的修改
   const loadedAdminEdit = useRef(existing ? existing.adminEditedAt || "" : "");
+  const now = useNow();
 
   if (!form) return <Empty icon={FileText} title="找不到這張表單" action={<Btn onClick={onBack}>返回</Btn>} />;
 
-  const locked = form.closed || form.settled;
+  const pastDeadline = deadlinePassed(form, now);
+  const locked = form.closed || form.settled || pastDeadline;
   const total = lines.reduce((s, l) => s + l.qty * l.price, 0);
 
   const addLine = (item) => {
@@ -1716,9 +1880,10 @@ function OrderEditor({ form, me, forms, saveForms, onBack, balance }) {
     const fresh = await fetchState();
     const freshForm = fresh.forms.find((f) => f.id === form.id);
     if (!freshForm) return askNotice("找不到這張表單", "這張表單可能已經被刪除了，請返回重新整理。");
-    if (freshForm.closed || freshForm.settled) {
+    // fetchState 剛更新過伺服器時間的差值，這裡用的 serverNow() 就是最新的
+    if (freshForm.closed || freshForm.settled || deadlinePassed(freshForm, serverNow())) {
       return askNotice(
-        freshForm.settled ? "表單已經結算" : "已經截止收單了",
+        freshForm.settled ? "表單已經結算" : !freshForm.closed ? "已經超過截止時間" : "已經截止收單了",
         freshForm.settled ? "管理員剛好已經完成結算，這筆訂單沒有送出，請直接找管理員處理。" : "要補點請找管理員，這筆訂單沒有送出。"
       );
     }
@@ -1762,7 +1927,16 @@ function OrderEditor({ form, me, forms, saveForms, onBack, balance }) {
         <p className="mt-1 text-sm text-stone-500 tabular-nums">{form.date}　你的餘額 {money(balance)}</p>
         {locked && (
           <p className="mt-3 rounded-lg mo-badge px-3 py-2.5 text-sm">
-            {form.settled ? "這張表單已結算，無法再更改。" : "已經截止收單了，要補點請找管理員。"}
+            {form.settled
+              ? "這張表單已結算，無法再更改。"
+              : pastDeadline && !form.closed
+                ? `已經超過截止時間（${fmtDeadline(form.deadline)}），要補點請找管理員。`
+                : "已經截止收單了，要補點請找管理員。"}
+          </p>
+        )}
+        {!locked && form.deadline && (
+          <p className="mt-3 rounded-lg bg-stone-100 px-3 py-2.5 text-sm text-stone-700 tabular-nums">
+            {fmtDeadline(form.deadline)} 截止，還剩 <span className="font-semibold">{fmtRemaining(Date.parse(form.deadline) - now)}</span>
           </p>
         )}
         {loadedAdminEdit.current && (
