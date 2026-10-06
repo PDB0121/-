@@ -1757,19 +1757,33 @@ function People({ users, balances, txs, saveUsers, saveTxs, onRefresh }) {
   const [initial, setInitial] = useState("");
   const [target, setTarget] = useState(null);
   const [renaming, setRenaming] = useState(null);
+  const [addErr, setAddErr] = useState("");
+  const [addBusy, setAddBusy] = useState(false);
+
+  const closeAdd = () => { setAdding(false); setAddErr(""); };
 
   const addUser = async () => {
-    if (!name.trim()) return;
-    const u = { id: uid(), name: name.trim(), createdAt: new Date().toISOString() };
-    await saveUsers([...users, u]);
+    const n = name.trim();
+    if (!n || addBusy) return;
+    if (n.length > 30) return setAddErr("姓名最多 30 個字。");
+    setAddBusy(true); setAddErr("");
+    // 用最新的名單來檢查同名，也避免兩位管理員同時新增時其中一位被蓋掉
+    const fresh = await fetchState();
+    if (!fresh) { setAddBusy(false); return setAddErr("讀取最新資料失敗，這位成員還沒有新增，請檢查網路後再試一次。"); }
+    if (fresh.users.some((x) => x.name === n)) {
+      setAddBusy(false);
+      return setAddErr(`已經有成員叫「${n}」，請加上區分，例如「${n} B」。`);
+    }
+    const u = { id: uid(), name: n, createdAt: new Date().toISOString() };
+    await saveUsers([...fresh.users, u]);
     const amt = Number(initial) || 0;
     if (amt !== 0) {
       await saveTxs([{
         id: uid(), userId: u.id, userName: u.name, date: today(), ts: new Date().toISOString(),
         amount: amt, type: "adjust", reason: "起始儲值金", items: [],
-      }, ...txs]);
+      }, ...fresh.tx]);
     }
-    setName(""); setInitial(""); setAdding(false);
+    setAddBusy(false); setName(""); setInitial(""); closeAdd();
   };
 
   const removeUser = async (u) => {
@@ -1821,16 +1835,21 @@ function People({ users, balances, txs, saveUsers, saveTxs, onRefresh }) {
         </Panel>
       )}
 
-      <Modal open={adding} onClose={() => setAdding(false)} title="新增成員">
+      <Modal open={adding} onClose={closeAdd} title="新增成員">
         <div className="space-y-4">
-          <Field label="姓名"><input className={inputCls} value={name} autoFocus onChange={(e) => setName(e.target.value)} placeholder="例如：王小明" /></Field>
+          <Field label="姓名">
+            <input className={inputCls} value={name} autoFocus placeholder="例如：王小明"
+              onChange={(e) => { setName(e.target.value); setAddErr(""); }}
+              onKeyDown={(e) => { if (e.key === "Enter") addUser(); }} />
+          </Field>
           <Field label="起始儲值金" hint="之後每天訂餐會從這裡扣。可以先填 0。">
             <input className={inputCls + " tabular-nums"} type="number" value={initial} onChange={(e) => setInitial(e.target.value)} placeholder="0" />
           </Field>
         </div>
+        {addErr && <p className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-800">{addErr}</p>}
         <div className="mt-6 flex justify-end gap-2">
-          <Btn variant="quiet" onClick={() => setAdding(false)}>取消</Btn>
-          <Btn onClick={addUser}>新增</Btn>
+          <Btn variant="quiet" onClick={closeAdd}>取消</Btn>
+          <Btn disabled={addBusy} onClick={addUser}>{addBusy ? "新增中…" : "新增"}</Btn>
         </div>
       </Modal>
 
