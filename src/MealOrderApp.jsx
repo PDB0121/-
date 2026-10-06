@@ -115,6 +115,49 @@ function deleteImageOnServer(formId) {
   fetch(`${API_BASE}/image?id=${encodeURIComponent(formId)}`, { method: "DELETE", headers: { Authorization: `Bearer ${token}` } }).catch(() => {});
 }
 
+/* ---------------- 管理員專用 API 與備份檔 ---------------- */
+// 呼叫需要管理員登入的 API（備份）。憑證過期就提示並重新載入。
+async function adminApi(path, { method = "GET", body } = {}) {
+  try {
+    const res = await fetch(`${API_BASE}${path}`, {
+      method, cache: "no-store",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${getToken() || ""}` },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    if (res.status === 401) {
+      setToken(null);
+      await askNotice("登入已過期", "請重新登入管理員後再操作一次。");
+      window.location.reload();
+      return { ok: false, status: 401, data: {} };
+    }
+    const data = await res.json().catch(() => ({}));
+    return { ok: res.ok, status: res.status, data };
+  } catch (e) {
+    return { ok: false, status: 0, data: { error: "連線失敗，請檢查網路後再試一次。" } };
+  }
+}
+
+// JSON 備份檔不能加 BOM（有 BOM 的 JSON 有些程式讀不進去）
+function downloadJson(filename, obj) {
+  try {
+    const blob = new Blob([JSON.stringify(obj, null, 1)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    return true;
+  } catch (e) { return false; }
+}
+
+const LAST_DOWNLOAD_KEY = "meal_order_last_backup_download";
+const BACKUP_KIND = { auto: "每日自動", manual: "手動", "pre-restore": "還原前自動留存" };
+const fmtDateTime = (iso) => new Date(iso).toLocaleString("zh-TW", { year: "numeric", month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false });
+const fileStamp = (d = new Date()) => {
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}`;
+};
+
 /* ---------------- 表單截止時間 ---------------- */
 const deadlinePassed = (f, now) => !!f.deadline && now >= Date.parse(f.deadline);
 const formClosed = (f, now) => !!f.closed || deadlinePassed(f, now);
@@ -1862,9 +1905,9 @@ function SettingsPane({ cfg, saveCfg, onWipe }) {
   };
 
   return (
-    <div className="max-w-lg">
+    <div className="max-w-2xl">
       <h2 className="mb-5 text-xl font-semibold tracking-tight">設定</h2>
-      <Panel className="space-y-4 p-5">
+      <Panel className="max-w-lg space-y-4 p-5">
         <Field label="網站名稱"><input className={inputCls} value={title} onChange={(e) => { setTitle(e.target.value); setSaved(false); }} /></Field>
         <Field label="管理員密碼" hint="訂餐者不需要密碼，只有管理端要。基於安全考量不會顯示目前的密碼；留空表示不更改，輸入新密碼（至少 4 個字元）才會更換。">
           <input className={inputCls} type="password" autoComplete="new-password" value={pin} placeholder="輸入新密碼才會更換"
@@ -1877,14 +1920,179 @@ function SettingsPane({ cfg, saveCfg, onWipe }) {
         </div>
       </Panel>
 
-      <Panel className="mt-5 p-5">
+      <BackupPane />
+
+      <Panel className="mt-5 max-w-lg p-5">
         <p className="text-sm font-medium text-stone-800">清除全部資料</p>
-        <p className="mt-1 text-sm text-stone-500">刪除所有成員、表單與帳務紀錄，無法復原。</p>
+        <p className="mt-1 text-sm text-stone-500">刪除所有成員、表單與帳務紀錄。清除前會先自動備份一份成員與交易紀錄，之後可以從上面的備份還原。</p>
         <div className="mt-3">
-          <Btn variant="danger" size="sm" onClick={async () => { if (await askConfirm({ title: "清除全部資料？", body: "所有成員、表單與帳務紀錄都會刪除，無法復原。", danger: true, confirmLabel: "全部清除" })) onWipe(); }}>清除全部資料</Btn>
+          <Btn variant="danger" size="sm" onClick={async () => {
+            const ok = await askConfirm({ title: "清除全部資料？", body: "所有成員、表單與帳務紀錄都會刪除。成員與交易紀錄會先自動備份一份，但表單與訂單無法復原。", danger: true, confirmLabel: "全部清除" });
+            if (!ok) return;
+            const b = await adminApi("/backup", { method: "POST", body: { action: "create" } });
+            if (!b.ok) return askNotice("沒有清除", "清除前的自動備份失敗，為了安全這次不清除，請稍後再試。");
+            onWipe();
+          }}>清除全部資料</Btn>
         </div>
       </Panel>
     </div>
+  );
+}
+
+/* 資料備份：每日自動備份的狀態與清單、立即備份、下載備份檔、還原 */
+function BackupPane() {
+  const [info, setInfo] = useState(null);
+  const [loadErr, setLoadErr] = useState("");
+  const [busy, setBusy] = useState("");
+  const [lastDownload, setLastDownload] = useState(() => { try { return Number(localStorage.getItem(LAST_DOWNLOAD_KEY)) || 0; } catch (e) { return 0; } });
+  const fileRef = useRef(null);
+
+  const load = useCallback(async () => {
+    const r = await adminApi("/backup?list=1");
+    if (r.ok) { setInfo(r.data); setLoadErr(""); } else setLoadErr((r.data && r.data.error) || "讀取備份清單失敗");
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  const markDownloaded = () => {
+    const t = Date.now();
+    try { localStorage.setItem(LAST_DOWNLOAD_KEY, String(t)); } catch (e) { /* 存不了就算了，只是少了提醒 */ }
+    setLastDownload(t);
+  };
+
+  // 目前資料的備份檔 / 餘額表
+  const downloadCurrent = async (kind) => {
+    setBusy(kind);
+    const r = await adminApi("/backup?current=1");
+    setBusy("");
+    if (!r.ok) return askNotice("下載失敗", (r.data && r.data.error) || "請稍後再試。");
+    const snap = r.data;
+    if (kind === "json") {
+      downloadJson(`餐費備份-${fileStamp()}.json`, snap);
+      markDownloaded();
+    } else {
+      const rows = [
+        ["備份時間", fmtDateTime(snap.createdAt)],
+        ["金庫總餘額", snap.summary.vault],
+        [],
+        ["成員", "餘額"],
+        ...snap.balances.map((b) => [b.name, b.balance]),
+      ];
+      downloadText(`餘額表-${fileStamp()}.csv`, toCsv(rows), "text/csv");
+    }
+  };
+
+  const downloadSnapshot = async (it) => {
+    setBusy(it.id);
+    const r = await adminApi(`/backup?id=${encodeURIComponent(it.id)}`);
+    setBusy("");
+    if (!r.ok) return askNotice("下載失敗", (r.data && r.data.error) || "找不到這份備份。");
+    downloadJson(`餐費備份-${fileStamp(new Date(it.createdAt))}-${BACKUP_KIND[it.kind]}.json`, r.data);
+    markDownloaded();
+  };
+
+  const createNow = async () => {
+    setBusy("create");
+    const r = await adminApi("/backup", { method: "POST", body: { action: "create" } });
+    setBusy("");
+    if (!r.ok) return askNotice("備份失敗", (r.data && r.data.error) || "請稍後再試。");
+    await load();
+    await askNotice("已備份", `已備份目前的資料：金庫總餘額 ${money(r.data.entry.vault)}、${r.data.entry.members} 位成員。`);
+  };
+
+  const confirmRestore = async (label, s, payload) => {
+    const ok = await askConfirm({
+      title: "還原成這個備份？",
+      body: `${label}\n金庫總餘額 ${money(s.vault)}、${s.members} 位成員、${s.txCount} 筆交易紀錄\n\n會用這份備份覆蓋「目前的成員名單與全部交易紀錄」，表單與訂單不受影響。\n還原前會先自動把現在的資料另存一份，按錯了還能還原回來。`,
+      danger: true, confirmLabel: "確認還原",
+    });
+    if (!ok) return;
+    setBusy("restore");
+    const r = await adminApi("/backup", { method: "POST", body: { action: "restore", ...payload } });
+    setBusy("");
+    if (!r.ok) return askNotice("還原失敗", (r.data && r.data.error) || "請稍後再試。");
+    await askNotice("已還原", `金庫總餘額 ${money(r.data.vault)}（${r.data.members} 位成員）。畫面會重新載入。`);
+    window.location.reload();
+  };
+
+  const onPickFile = async (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    try {
+      const snap = JSON.parse((await file.text()).replace(/^\uFEFF/, ""));
+      if (!snap || snap.app !== "meal-order-app" || !snap.summary) throw new Error("not a backup");
+      await confirmRestore(`備份檔「${file.name}」（${fmtDateTime(snap.createdAt)}）`, snap.summary, { snapshot: snap });
+    } catch (err) {
+      await askNotice("讀不了這個檔案", "請選擇從這個網站下載的備份檔（.json）。");
+    } finally {
+      if (fileRef.current) fileRef.current.value = "";
+    }
+  };
+
+  const days = lastDownload ? Math.floor((Date.now() - lastDownload) / 86400000) : null;
+  const lastRun = info && info.lastRun;
+
+  return (
+    <Panel className="mt-5 p-5">
+      <p className="text-sm font-medium text-stone-800">資料備份</p>
+      <p className="mt-1 text-sm text-stone-500">
+        每天凌晨 4 點（台灣時間）自動備份成員名單、全部交易紀錄與每人餘額，保留最近 30 份；資料沒變動的日子不會產生新備份。
+      </p>
+      <p className="mt-2 text-sm text-stone-600">
+        上次自動備份：{lastRun
+          ? `${fmtDateTime(lastRun.at)}（${lastRun.result === "saved" ? "已備份" : "沒有變動，不需備份"}）`
+          : "還沒有執行過，第一次會在今天凌晨自動執行"}
+      </p>
+      {loadErr && <p className="mt-2 text-sm text-red-800">{loadErr}</p>}
+
+      <div className={`mt-4 rounded-lg px-3 py-2.5 text-sm ${days === null || days >= 7 ? "mo-badge" : "bg-stone-50 text-stone-600"}`}>
+        <p className="font-medium">自動備份存在同一個資料庫裡，資料庫本身出問題時會一起消失，所以也請定期下載備份檔，存到自己的雲端硬碟或電腦。</p>
+        <p className="mt-1">
+          {days === null ? "這個瀏覽器還沒有下載過備份檔，建議現在下載一份。"
+            : days >= 7 ? `上次在這個瀏覽器下載備份檔是 ${days} 天前，建議再下載一份。`
+              : `上次在這個瀏覽器下載備份檔：${days === 0 ? "今天" : `${days} 天前`}。`}
+        </p>
+      </div>
+
+      <div className="mt-4 flex flex-wrap gap-2">
+        <Btn size="sm" variant="accent" disabled={!!busy} onClick={() => downloadCurrent("json")}>
+          {busy === "json" ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}下載完整備份檔
+        </Btn>
+        <Btn size="sm" variant="quiet" disabled={!!busy} onClick={() => downloadCurrent("csv")}>
+          {busy === "csv" ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}下載餘額表（Excel）
+        </Btn>
+        <Btn size="sm" variant="quiet" disabled={!!busy} onClick={createNow}>
+          {busy === "create" ? <Loader2 size={14} className="animate-spin" /> : <Copy size={14} />}立即備份一份
+        </Btn>
+        <input ref={fileRef} type="file" accept=".json,application/json" className="hidden" onChange={onPickFile} />
+        <Btn size="sm" variant="danger" disabled={!!busy} onClick={() => fileRef.current && fileRef.current.click()}>
+          <Upload size={14} />從備份檔還原…
+        </Btn>
+      </div>
+
+      <h3 className="mb-1 mt-6 text-sm font-medium text-stone-700">備份清單{info ? `（${info.items.length}）` : ""}</h3>
+      {!info && !loadErr && <p className="py-4 text-sm text-stone-500">讀取中…</p>}
+      {info && info.items.length === 0 && <p className="py-4 text-sm text-stone-500">還沒有備份。可以先按「立即備份一份」。</p>}
+      {info && info.items.length > 0 && (
+        <div className="divide-y divide-stone-100">
+          {info.items.map((it) => (
+            <div key={it.id} className="flex flex-wrap items-center gap-x-4 gap-y-2 py-3">
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-medium text-stone-800">
+                  {fmtDateTime(it.createdAt)}
+                  <span className="ml-2 whitespace-nowrap rounded bg-stone-100 px-1.5 py-0.5 text-xs font-normal text-stone-600">{BACKUP_KIND[it.kind] || it.kind}</span>
+                </p>
+                <p className="mt-0.5 text-xs text-stone-500 tabular-nums">金庫 {money(it.vault)}　{it.members} 位成員　{it.txCount} 筆交易</p>
+              </div>
+              <div className="flex gap-2">
+                <Btn size="sm" variant="quiet" disabled={!!busy} onClick={() => downloadSnapshot(it)}>下載</Btn>
+                <Btn size="sm" variant="danger" disabled={!!busy}
+                  onClick={() => confirmRestore(`${fmtDateTime(it.createdAt)} 的${BACKUP_KIND[it.kind] || ""}備份`, it, { id: it.id })}>還原</Btn>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </Panel>
   );
 }
 
