@@ -1,5 +1,6 @@
 import { getRedis } from "./_lib/redis.js";
 import { signAdminToken } from "./_lib/auth.js";
+import { normalizeStoredForms } from "./_lib/forms.js";
 
 const MAX_FAILS = 10;
 const FAIL_WINDOW_SEC = 10 * 60;
@@ -38,6 +39,8 @@ export default async function handler(req, res) {
     }
 
     await redis.del(failKey);
+    // 趁管理員登入把還內嵌在 forms 裡的舊照片搬到獨立的 key（沒有舊照片時只多一次讀取）。失敗也不影響登入。
+    await normalizeStoredForms(redis).catch((e) => console.error("normalizeStoredForms", e));
     const token = await signAdminToken(redis);
     res.status(200).json({ ok: true, token });
   } catch (e) {

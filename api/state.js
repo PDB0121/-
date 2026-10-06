@@ -1,5 +1,6 @@
 import { getRedis } from "./_lib/redis.js";
 import { verifyAdminToken, signAdminToken, revokeAllAdminTokens } from "./_lib/auth.js";
+import { stripInlineImages, externalizeImages } from "./_lib/forms.js";
 
 const KEYS = ["users", "forms", "tx", "cfg"];
 const DEFAULTS = {
@@ -24,9 +25,11 @@ export default async function handler(req, res) {
 
   try {
     if (req.method === "GET") {
-      const values = await Promise.all(KEYS.map((k) => redis.get(k)));
+      // 一個指令讀完四個 key（原本是四個指令），免費方案的指令數是每月 50 萬次
+      const values = await redis.mget(...KEYS);
       const state = {};
       KEYS.forEach((k, i) => { state[k] = values[i] ?? DEFAULTS[k]; });
+      state.forms = stripInlineImages(state.forms);
       // 管理員密碼只存在伺服器端，絕對不回傳給瀏覽器
       const { pin, ...publicCfg } = state.cfg || {};
       state.cfg = publicCfg;
@@ -63,6 +66,9 @@ export default async function handler(req, res) {
           res.status(200).json({ ok: true, token: await signAdminToken(redis) });
           return;
         }
+      } else if (key === "forms") {
+        // 新上傳或舊版畫面送來的內嵌照片，在這裡搬到獨立的 key
+        await redis.set("forms", await externalizeImages(redis, value));
       } else {
         await redis.set(key, value);
       }

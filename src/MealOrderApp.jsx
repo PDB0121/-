@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useRef, useCallback } from "react"
 import {
   Utensils, Users, Wallet, Receipt, Shield, User, RefreshCw, Plus, Minus,
   Trash2, Check, X, ChevronLeft, Upload, Loader2, ClipboardList, Calendar,
-  Lock, LogOut, Settings, Search, FileText, ImageIcon, CircleDollarSign, Copy, Download, Edit3, Clock,
+  Lock, LogOut, Settings, Search, FileText, ImageIcon, CircleDollarSign, Copy, Download, Edit3, Clock, ExternalLink,
 } from "lucide-react";
 
 /* ---------------- storage ----------------
@@ -87,6 +87,33 @@ const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(
 const today = () => new Date().toISOString().slice(0, 10);
 const money = (n) => (n < 0 ? "-" : "") + "NT$" + Math.abs(Math.round(n)).toLocaleString("en-US");
 const lineKey = (l) => `${l.name}||${(l.note || "").trim()}`;
+
+/* ---------------- 菜單照片與外部連結 ---------------- */
+// 照片不放在每 12 秒同步一次的資料裡，表單只記「有照片」(hasImage) 與版本 (imgVer)，要顯示時才用網址載入、由瀏覽器快取。
+// 剛上傳、還沒跟伺服器同步的照片會暫時帶著 menuImage（data URL）直接顯示。
+const menuImageSrc = (f) => f.menuImage || (f.hasImage ? `${API_BASE}/image?id=${encodeURIComponent(f.id)}&v=${f.imgVer || 1}` : null);
+
+// 只接受 http / https 的網址（資料庫裡的內容不能整個信任，避免 javascript: 之類的連結被點開）。沒寫開頭會自動補 https://
+function safeUrl(input) {
+  if (typeof input !== "string") return null;
+  const s = input.trim();
+  if (!s || s.length > 500) return null;
+  const hasScheme = /^[a-z][a-z0-9+.-]*:/i.test(s) && !/^[^/:]+\.[^/:]+:\d/.test(s); // "example.com:8080" 的冒號是連接埠，不是協定
+  try {
+    const url = new URL(hasScheme ? s : `https://${s}`);
+    return url.protocol === "http:" || url.protocol === "https:" ? url.href : null;
+  } catch (e) {
+    return null;
+  }
+}
+const linkHost = (href) => { try { return new URL(href).hostname.replace(/^www\./, ""); } catch (e) { return href; } };
+
+// 刪表單、移除照片時順手把伺服器上的照片也清掉（失敗也沒關係，只是多佔一點空間）
+function deleteImageOnServer(formId) {
+  const token = getToken();
+  if (!token) return;
+  fetch(`${API_BASE}/image?id=${encodeURIComponent(formId)}`, { method: "DELETE", headers: { Authorization: `Bearer ${token}` } }).catch(() => {});
+}
 
 /* ---------------- 表單截止時間 ---------------- */
 const deadlinePassed = (f, now) => !!f.deadline && now >= Date.parse(f.deadline);
@@ -459,6 +486,19 @@ function MenuImage({ src, className, label }) {
   );
 }
 
+/* 表單的外部連結（店家菜單、地圖、訂餐網頁…），另開分頁 */
+function FormLink({ href, className = "" }) {
+  const url = safeUrl(href);
+  if (!url) return null;
+  return (
+    <a href={url} target="_blank" rel="noopener noreferrer"
+      className={`inline-flex max-w-full items-center gap-1.5 rounded-lg border border-stone-300 bg-white px-3 py-1.5 text-sm text-stone-700 hover:bg-stone-50 ${className}`}>
+      <ExternalLink size={14} className="shrink-0" />
+      <span className="truncate">外部連結：{linkHost(url)}</span>
+    </a>
+  );
+}
+
 /* 訂餐頁用的菜單照片：整條顯示，點擊放大 */
 function MenuImageBanner({ src }) {
   const [open, setOpen] = useState(false);
@@ -758,6 +798,7 @@ function AdminForms({ forms, saveForms, onOpen }) {
     const fresh = await fetchFresh();
     if (!fresh) return;
     await saveForms(fresh.forms.filter((f) => f.id !== id));
+    deleteImageOnServer(id);
   };
 
   return (
@@ -847,6 +888,7 @@ function CreateForm({ open, onClose, onCreate }) {
   const [title, setTitle] = useState("");
   const [date, setDate] = useState(today());
   const [deadline, setDeadline] = useState("");
+  const [link, setLink] = useState("");
   const [items, setItems] = useState([]);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
@@ -854,7 +896,7 @@ function CreateForm({ open, onClose, onCreate }) {
   const fileRef = useRef(null);
 
   useEffect(() => {
-    if (open) { setTitle(""); setDate(today()); setDeadline(""); setItems([]); setErr(""); setPreview(null); }
+    if (open) { setTitle(""); setDate(today()); setDeadline(""); setLink(""); setItems([]); setErr(""); setPreview(null); }
   }, [open]);
 
   const onFile = async (e) => {
@@ -881,11 +923,14 @@ function CreateForm({ open, onClose, onCreate }) {
   const create = async () => {
     const d = parseDeadline(deadline);
     if (d.error) return setErr(d.error);
+    const linkUrl = link.trim() ? safeUrl(link) : null;
+    if (link.trim() && !linkUrl) return setErr("外部連結的格式不對，請貼上 http:// 或 https:// 開頭的網址。");
     const clean = items.filter((i) => i.name.trim());
     const r = await onCreate({
       id: uid(), title: title.trim() || date, date, createdAt: new Date().toISOString(),
       items: clean.map((i) => ({ ...i, name: i.name.trim(), price: Number(i.price) || 0 })),
-      orders: [], closed: false, settled: false, menuImage: preview || null, deadline: d.iso,
+      // 照片先隨表單一起送出，伺服器收到後會搬到獨立的 key
+      orders: [], closed: false, settled: false, menuImage: preview || null, deadline: d.iso, link: linkUrl,
     });
     if (r && r.error) setErr(r.error);
   };
@@ -901,6 +946,13 @@ function CreateForm({ open, onClose, onCreate }) {
         <span className="mb-1.5 block text-sm font-medium text-stone-700">截止時間（可留空）</span>
         <DeadlineField value={deadline} onChange={(v) => { setDeadline(v); setErr(""); }} />
         <span className="mt-1 block text-xs text-stone-500">時間一到，訂餐者就不能再填或修改，不用手動按「停止收單」。</span>
+      </div>
+
+      <div className="mt-4">
+        <Field label="外部連結（可留空）" hint="例如店家的線上菜單、Google 地圖或訂餐網頁，訂餐者填單時可以直接點開。">
+          <input className={inputCls} inputMode="url" value={link} placeholder="https://"
+            onChange={(e) => { setLink(e.target.value); setErr(""); }} />
+        </Field>
       </div>
 
       <div className="mt-5 rounded-xl border border-dashed border-stone-300 bg-stone-50 p-5 text-center">
@@ -1077,12 +1129,13 @@ function AdminFormDetail({ form, users, balances, onBack, forms, saveForms, txs,
 
       <Panel className="mb-5 p-5">
         <div className="flex flex-wrap items-start gap-4">
-          {form.menuImage && (
-            <MenuImage src={form.menuImage} className="h-20 w-20 shrink-0" label={`${form.title} 菜單照片`} />
+          {menuImageSrc(form) && (
+            <MenuImage src={menuImageSrc(form)} className="h-20 w-20 shrink-0" label={`${form.title} 菜單照片`} />
           )}
           <div className="min-w-0 flex-1">
             <h2 className="text-xl font-semibold tracking-tight">{form.title}</h2>
             <p className="mt-1 text-sm text-stone-500 tabular-nums">{form.date}　{form.orders.length} 人已填</p>
+            {form.link && <div className="mt-2"><FormLink href={form.link} /></div>}
             {!form.settled && (form.closed || form.deadline) && (
               <p className="mt-0.5 text-sm text-stone-500">
                 {form.closed
@@ -1101,7 +1154,7 @@ function AdminFormDetail({ form, users, balances, onBack, forms, saveForms, txs,
         <div className="mt-4 flex flex-wrap gap-2">
           {!form.settled && <Btn variant="quiet" size="sm" onClick={toggleClosed}>{isClosed ? "重新開放填單" : "停止收單"}</Btn>}
           {!form.settled && <Btn variant="quiet" size="sm" onClick={() => setSettingDeadline(true)}><Clock size={14} />{form.deadline ? "修改截止時間" : "設定截止時間"}</Btn>}
-          {!form.settled && <Btn variant="quiet" size="sm" onClick={() => setEditingMenu(true)}><Edit3 size={14} />編輯品項</Btn>}
+          {!form.settled && <Btn variant="quiet" size="sm" onClick={() => setEditingMenu(true)}><Edit3 size={14} />編輯品項與連結</Btn>}
           {form.settled
             ? <span className="inline-flex items-center gap-1.5 rounded-lg bg-stone-100 px-3 py-1.5 text-sm text-stone-600"><Check size={14} />已於 {form.settledAt?.slice(0, 10)} 完成扣款</span>
             : <Btn size="sm" variant="accent" onClick={settle}><CircleDollarSign size={15} />結算並扣儲值金</Btn>}
@@ -1170,9 +1223,15 @@ function AdminFormDetail({ form, users, balances, onBack, forms, saveForms, txs,
       )}
 
       <MenuEditModal open={editingMenu} onClose={() => setEditingMenu(false)} form={form}
-        onSave={async (items, menuImage) => {
+        onSave={async (items, link, photo) => {
           setEditingMenu(false); // 先關視窗，之後如果要提示（連線失敗、表單已結算）才不會被擋在視窗後面
-          await updateFormFresh(saveForms, form.id, (f) => ({ ...f, items, menuImage }));
+          const ok = await updateFormFresh(saveForms, form.id, (f) => {
+            const next = { ...f, items, link };
+            if (photo.replace) next.menuImage = photo.replace;              // 新照片：伺服器收到後搬到獨立的 key
+            else if (photo.remove) { next.menuImage = null; next.hasImage = false; }
+            return next;                                                     // 沒動照片就維持原樣
+          });
+          if (ok && photo.remove) deleteImageOnServer(form.id);
         }} />
 
       {editingOrder && (
@@ -1336,15 +1395,37 @@ function AdminOrderEditModal({ order, onClose, onSave }) {
 
 function MenuEditModal({ open, onClose, form, onSave }) {
   const [items, setItems] = useState([]);
-  const [menuImage, setMenuImage] = useState(null);
+  const [link, setLink] = useState("");
+  const [newPhoto, setNewPhoto] = useState(null);      // 這次剛選的新照片（data URL）
+  const [photoRemoved, setPhotoRemoved] = useState(false);
+  const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
   const fileRef = useRef(null);
 
+  // 只在視窗打開（或換成另一張表單）時載入內容；不能跟著 form 物件跑，
+  // 不然每 12 秒同步一次就會把還沒儲存的修改洗掉
+  const formId = form ? form.id : null;
   useEffect(() => {
-    if (open && form) { setItems(form.items.map((i) => ({ ...i }))); setMenuImage(form.menuImage || null); }
-  }, [open, form]);
+    if (open && form) {
+      setItems(form.items.map((i) => ({ ...i })));
+      setLink(form.link || "");
+      setNewPhoto(null); setPhotoRemoved(false); setErr("");
+    }
+  }, [open, formId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!form) return null;
+
+  const shownPhoto = photoRemoved ? null : newPhoto || menuImageSrc(form);
+
+  const submit = () => {
+    const linkUrl = link.trim() ? safeUrl(link) : null;
+    if (link.trim() && !linkUrl) return setErr("外部連結的格式不對，請貼上 http:// 或 https:// 開頭的網址。");
+    onSave(
+      items.filter((i) => String(i.name).trim()).map((i) => ({ ...i, name: String(i.name).trim(), price: Number(i.price) || 0 })),
+      linkUrl,
+      { replace: newPhoto || undefined, remove: photoRemoved && !newPhoto },
+    );
+  };
 
   const onFile = async (e) => {
     const file = e.target.files && e.target.files[0];
@@ -1358,9 +1439,9 @@ function MenuEditModal({ open, onClose, form, onSave }) {
         r.readAsDataURL(file);
       });
       const compressed = await resizeImage(dataUrl);
-      setMenuImage(compressed || dataUrl);
+      setNewPhoto(compressed || dataUrl); setPhotoRemoved(false);
     } catch (e2) {
-      await askNotice("圖片讀取失敗", e2.message);
+      setErr("圖片讀取失敗：" + e2.message);
     } finally {
       setBusy(false);
       if (fileRef.current) fileRef.current.value = "";
@@ -1368,7 +1449,7 @@ function MenuEditModal({ open, onClose, form, onSave }) {
   };
 
   return (
-    <Modal open={open} onClose={onClose} title={`編輯「${form.title}」的品項`} wide>
+    <Modal open={open} onClose={onClose} title={`編輯「${form.title}」的品項與連結`} wide>
       <p className="mb-4 text-sm text-stone-500">
         改價格或加品項不會動到已經填好的訂單，那些訂單保留當時的價格。要更新舊訂單請該成員重新送出。
       </p>
@@ -1376,24 +1457,31 @@ function MenuEditModal({ open, onClose, form, onSave }) {
       <div className="mb-5">
         <span className="mb-1.5 block text-sm font-medium text-stone-700">菜單照片</span>
         <div className="flex items-center gap-3">
-          {menuImage
-            ? <MenuImage src={menuImage} className="h-20 w-20" label="菜單照片" />
+          {shownPhoto
+            ? <MenuImage src={shownPhoto} className="h-20 w-20" label="菜單照片" />
             : <div className="flex h-20 w-20 items-center justify-center rounded-lg border border-dashed border-stone-300 text-stone-400"><ImageIcon size={22} /></div>}
           <div className="flex flex-col gap-2">
             <input ref={fileRef} type="file" accept="image/*" onChange={onFile} className="hidden" />
             <Btn size="sm" variant="quiet" disabled={busy} onClick={() => fileRef.current && fileRef.current.click()}>
-              {busy ? <><Loader2 size={14} className="animate-spin" />處理中</> : <><Upload size={14} />{menuImage ? "更換照片" : "上傳照片"}</>}
+              {busy ? <><Loader2 size={14} className="animate-spin" />處理中</> : <><Upload size={14} />{shownPhoto ? "更換照片" : "上傳照片"}</>}
             </Btn>
-            {menuImage && <button onClick={() => setMenuImage(null)} className="text-left text-xs text-stone-400 hover:text-red-800">移除照片</button>}
+            {shownPhoto && <button onClick={() => { setNewPhoto(null); setPhotoRemoved(true); }} className="text-left text-xs text-stone-400 hover:text-red-800">移除照片</button>}
           </div>
         </div>
       </div>
 
+      <div className="mb-5">
+        <Field label="外部連結（可留空）" hint="例如店家的線上菜單、Google 地圖或訂餐網頁，訂餐者填單時可以直接點開。">
+          <input className={inputCls} inputMode="url" value={link} placeholder="https://"
+            onChange={(e) => { setLink(e.target.value); setErr(""); }} />
+        </Field>
+      </div>
+
       <ItemRows items={items} setItems={setItems} />
+      {err && <p className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-800">{err}</p>}
       <div className="mt-6 flex justify-end gap-2">
         <Btn variant="quiet" onClick={onClose}>取消</Btn>
-        <Btn onClick={() => onSave(items.filter((i) => String(i.name).trim())
-          .map((i) => ({ ...i, name: String(i.name).trim(), price: Number(i.price) || 0 })), menuImage)}>儲存</Btn>
+        <Btn disabled={busy} onClick={submit}>儲存</Btn>
       </div>
     </Modal>
   );
@@ -1970,7 +2058,9 @@ function OrderEditor({ form, me, forms, saveForms, onBack, balance }) {
         )}
       </div>
 
-      <MenuImageBanner src={form.menuImage} />
+      {form.link && <div className="mb-5"><FormLink href={form.link} /></div>}
+
+      <MenuImageBanner src={menuImageSrc(form)} />
 
       {!locked && (
         <Panel className="mb-5">
