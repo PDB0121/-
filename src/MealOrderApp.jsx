@@ -46,8 +46,16 @@ async function fetchState() {
     return { ...DEFAULT_STATE, ...data };
   } catch (e) {
     console.error("讀取資料失敗", e);
-    return DEFAULT_STATE;
+    // 失敗就回傳 null，不要回傳空資料：拿空資料當基底去存檔會把現有的表單、訂單整個清掉
+    return null;
   }
+}
+
+// 要拿來存檔的最新資料：讀取失敗就提示並回傳 null，呼叫的地方直接中止
+async function fetchFresh() {
+  const s = await fetchState();
+  if (!s) await askNotice("連線失敗", "讀取最新資料失敗，這次的操作沒有儲存，請檢查網路後再試一次。");
+  return s;
 }
 async function saveState(key, value) {
   try {
@@ -115,7 +123,8 @@ const toLocalInput = (ms) => {
 
 // 只改動這一張表單：先抓最新資料再改，避免拿畫面上可能過期的整包資料蓋掉別人剛送出的訂單
 async function updateFormFresh(saveForms, formId, mutate) {
-  const fresh = await fetchState();
+  const fresh = await fetchFresh();
+  if (!fresh) return false;
   const f = fresh.forms.find((x) => x.id === formId);
   if (!f) { await askNotice("找不到這張表單", "這張表單可能已經被刪除了，請返回重新整理。"); return false; }
   if (f.settled) { await askNotice("表單已經結算", "已結算的表單不能再更改。"); return false; }
@@ -485,6 +494,7 @@ export default function MealOrderApp() {
   const refresh = useCallback(async (silent) => {
     if (!silent) setSyncing(true);
     const s = await fetchState();
+    if (!s) { setSyncing(false); setLoading(false); return; } // 暫時連不上就保留畫面上現有的資料
     setUsers(s.users); setForms(s.forms); setTxs(s.tx); setCfg(s.cfg);
     setSyncedAt(new Date());
     setSyncing(false);
@@ -745,7 +755,9 @@ function AdminForms({ forms, saveForms, onOpen }) {
   const remove = async (id) => {
     const ok = await askConfirm({ title: "刪除這張表單？", body: "表單與裡面的訂單會消失。已結算的扣款紀錄會保留在扣款明細裡。", danger: true, confirmLabel: "刪除表單" });
     if (!ok) return;
-    await saveForms(forms.filter((f) => f.id !== id));
+    const fresh = await fetchFresh();
+    if (!fresh) return;
+    await saveForms(fresh.forms.filter((f) => f.id !== id));
   };
 
   return (
@@ -797,7 +809,9 @@ function AdminForms({ forms, saveForms, onOpen }) {
       )}
 
       <CreateForm open={creating} onClose={() => setCreating(false)} onCreate={async (form) => {
-        await saveForms([form, ...forms]); setCreating(false);
+        const fresh = await fetchState();
+        if (!fresh) return { error: "讀取最新資料失敗，這張表單還沒有建立，請檢查網路後再試一次。" };
+        await saveForms([form, ...fresh.forms]); setCreating(false);
       }} />
     </div>
   );
@@ -864,15 +878,16 @@ function CreateForm({ open, onClose, onCreate }) {
     }
   };
 
-  const create = () => {
+  const create = async () => {
     const d = parseDeadline(deadline);
     if (d.error) return setErr(d.error);
     const clean = items.filter((i) => i.name.trim());
-    onCreate({
+    const r = await onCreate({
       id: uid(), title: title.trim() || date, date, createdAt: new Date().toISOString(),
       items: clean.map((i) => ({ ...i, name: i.name.trim(), price: Number(i.price) || 0 })),
       orders: [], closed: false, settled: false, menuImage: preview || null, deadline: d.iso,
     });
+    if (r && r.error) setErr(r.error);
   };
 
   return (
@@ -996,7 +1011,8 @@ function AdminFormDetail({ form, users, balances, onBack, forms, saveForms, txs,
     if (form.settled) return;
     // 結算前先重新抓一次最新資料：避免用畫面上舊的訂單清單結算，漏掉別人剛好在這幾秒內送出的訂單，
     // 也避免拿舊資料整包蓋掉其他人同一時間的異動。
-    const fresh = await fetchState();
+    const fresh = await fetchFresh();
+    if (!fresh) return;
     const freshForm = fresh.forms.find((f) => f.id === form.id);
     if (!freshForm) return askNotice("找不到這張表單", "這張表單可能已經被刪除了，請返回重新整理。");
     if (freshForm.settled) return askNotice("已經結算過了", "這張表單剛剛已經被結算過，不用重複操作。");
@@ -1007,7 +1023,8 @@ function AdminFormDetail({ form, users, balances, onBack, forms, saveForms, txs,
     if (!ok) return;
     // 確認框開著、等管理員點擊的這段時間也可能被別人（或另一個分頁）搶先結算，
     // 真正寫入前再檢查一次最新狀態，避免同一張表單被結算兩次、重複扣款。
-    const latest = await fetchState();
+    const latest = await fetchFresh();
+    if (!latest) return;
     const latestForm = latest.forms.find((f) => f.id === form.id);
     if (!latestForm || latestForm.settled) {
       return askNotice("已經結算過了", "剛剛確認的同時，這張表單已經被結算了，不用重複操作。");
@@ -1026,7 +1043,7 @@ function AdminFormDetail({ form, users, balances, onBack, forms, saveForms, txs,
     if (form.settled) return;
     const ok = await askConfirm({ title: "刪除這筆訂單？", body: "這個人就不算在這張表單裡了。", danger: true, confirmLabel: "刪除" });
     if (!ok) return;
-    await saveForms(forms.map((f) => (f.id === form.id ? { ...f, orders: f.orders.filter((o) => o.id !== oid) } : f)));
+    await updateFormFresh(saveForms, form.id, (f) => ({ ...f, orders: f.orders.filter((o) => o.id !== oid) }));
   };
 
   // 儲存管理員對某筆訂單的修改。寫入前先抓最新資料，訂單已經結算、被取消、或剛被訂餐者改過就擋下來，
@@ -1034,6 +1051,7 @@ function AdminFormDetail({ form, users, balances, onBack, forms, saveForms, txs,
   const saveOrderEdit = async (order, lines, orderNote) => {
     const stop = (title, body) => { setEditingOrder(null); return askNotice(title, body); };
     const fresh = await fetchState();
+    if (!fresh) return stop("連線失敗", "讀取最新資料失敗，這次的修改沒有儲存，請檢查網路後再試一次。");
     const f = fresh.forms.find((x) => x.id === form.id);
     if (!f) return stop("找不到這張表單", "這張表單可能已經被刪除了，請返回重新整理。");
     if (f.settled) return stop("表單已經結算", "已結算的表單不能再修改訂單。");
@@ -1153,8 +1171,8 @@ function AdminFormDetail({ form, users, balances, onBack, forms, saveForms, txs,
 
       <MenuEditModal open={editingMenu} onClose={() => setEditingMenu(false)} form={form}
         onSave={async (items, menuImage) => {
-          await saveForms(forms.map((f) => (f.id === form.id ? { ...f, items, menuImage } : f)));
-          setEditingMenu(false);
+          setEditingMenu(false); // 先關視窗，之後如果要提示（連線失敗、表單已結算）才不會被擋在視窗後面
+          await updateFormFresh(saveForms, form.id, (f) => ({ ...f, items, menuImage }));
         }} />
 
       {editingOrder && (
@@ -1877,7 +1895,8 @@ function OrderEditor({ form, me, forms, saveForms, onBack, balance }) {
     if (lines.length === 0) return askNotice("還沒選餐點", "從上面的菜單點一下就會加進來。");
     // 送出前先重新抓一次最新資料：如果表單這幾秒內被管理員截止或結算了，就擋下來，
     // 不要拿畫面上舊的表單狀態整包蓋回去（會把管理員剛做的截止/結算蓋掉）。
-    const fresh = await fetchState();
+    const fresh = await fetchFresh();
+    if (!fresh) return;
     const freshForm = fresh.forms.find((f) => f.id === form.id);
     if (!freshForm) return askNotice("找不到這張表單", "這張表單可能已經被刪除了，請返回重新整理。");
     // fetchState 剛更新過伺服器時間的差值，這裡用的 serverNow() 就是最新的
@@ -1910,7 +1929,14 @@ function OrderEditor({ form, me, forms, saveForms, onBack, balance }) {
   const withdraw = async () => {
     const ok = await askConfirm({ title: "取消這次訂餐？", body: "你填的內容會從這張表單移除。", danger: true, confirmLabel: "取消訂餐" });
     if (!ok) return;
-    await saveForms(forms.map((f) => (f.id === form.id ? { ...f, orders: f.orders.filter((o) => o.userId !== me.id) } : f)));
+    const fresh = await fetchFresh();
+    if (!fresh) return;
+    const f = fresh.forms.find((x) => x.id === form.id);
+    if (!f) return askNotice("找不到這張表單", "這張表單可能已經被刪除了，請返回重新整理。");
+    if (f.closed || f.settled || deadlinePassed(f, serverNow())) {
+      return askNotice(f.settled ? "表單已經結算" : "已經截止收單了", "現在不能再取消訂單，要更動請找管理員。");
+    }
+    await saveForms(fresh.forms.map((x) => (x.id === form.id ? { ...x, orders: x.orders.filter((o) => o.userId !== me.id) } : x)));
     onBack();
   };
 
