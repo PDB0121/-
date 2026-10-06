@@ -84,7 +84,16 @@ async function saveState(key, value) {
 
 /* ---------------- utils ---------------- */
 const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
-const today = () => new Date().toISOString().slice(0, 10);
+// 用「本地」日期（台灣 UTC+8）。用 toISOString 會是 UTC 日期，早上 8 點以前會變成前一天。
+const localDate = (d) => {
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+};
+const today = () => localDate(new Date());
+const addDays = (dateStr, n) => {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  return localDate(new Date(y, m - 1, d + n));
+};
 const money = (n) => (n < 0 ? "-" : "") + "NT$" + Math.abs(Math.round(n)).toLocaleString("en-US");
 const lineKey = (l) => `${l.name}||${(l.note || "").trim()}`;
 
@@ -639,7 +648,7 @@ export default function MealOrderApp() {
 
   const navAdmin = [
     { id: "forms", label: "訂餐表單", icon: ClipboardList },
-    { id: "daily", label: "每日結算", icon: Calendar },
+    { id: "daily", label: "結算統計", icon: Calendar },
     { id: "people", label: "成員儲值", icon: Users },
     { id: "ledger", label: "扣款明細", icon: Receipt },
     { id: "settings", label: "設定", icon: Settings },
@@ -1530,80 +1539,166 @@ function MenuEditModal({ open, onClose, form, onSave }) {
   );
 }
 
-/* ---------------- 每日結算 ---------------- */
-function DailySettlement({ forms, txs, users }) {
-  const [date, setDate] = useState(today());
+/* ---------------- 結算統計（可選日期範圍） ---------------- */
+function DailySettlement({ forms }) {
+  const [start, setStart] = useState(today());
+  const [end, setEnd] = useState(today());
 
-  const dayForms = forms.filter((f) => f.date === date);
+  // 起訖日期填反了就自動對調
+  const valid = !!start && !!end;
+  const lo = valid && start > end ? end : start;
+  const hi = valid && start > end ? start : end;
+  const label = lo === hi ? lo : `${lo} ～ ${hi}`;
+  const multiDay = lo !== hi;
+
+  const rangeForms = useMemo(() => (valid ? forms.filter((f) => f.date >= lo && f.date <= hi) : []), [forms, valid, lo, hi]);
+
   const rows = useMemo(() => {
     const m = new Map();
-    dayForms.forEach((f) => {
+    rangeForms.forEach((f) => {
       f.orders.forEach((o) => {
-        if (!m.has(o.userId)) m.set(o.userId, { userId: o.userId, name: o.userName, total: 0, detail: [] });
+        if (!m.has(o.userId)) m.set(o.userId, { userId: o.userId, name: o.userName, total: 0, paid: 0, unpaid: 0, detail: [] });
         const r = m.get(o.userId);
         r.total += o.total;
-        r.detail.push({ form: f.title, settled: f.settled, total: o.total, lines: o.lines });
+        if (f.settled) r.paid += o.total; else r.unpaid += o.total;
+        r.detail.push({ date: f.date, form: f.title, settled: f.settled, total: o.total, lines: o.lines });
       });
     });
-    return [...m.values()].sort((a, b) => b.total - a.total);
-  }, [dayForms]);
+    const list = [...m.values()];
+    list.forEach((r) => r.detail.sort((a, b) => a.date.localeCompare(b.date)));
+    return list.sort((a, b) => b.total - a.total);
+  }, [rangeForms]);
 
+  // 每天的小計（只列有訂單的日子）
+  const byDay = useMemo(() => {
+    const m = new Map();
+    rangeForms.forEach((f) => {
+      if (f.orders.length === 0) return;
+      if (!m.has(f.date)) m.set(f.date, { date: f.date, forms: 0, people: new Set(), total: 0 });
+      const d = m.get(f.date);
+      d.forms += 1;
+      f.orders.forEach((o) => { d.people.add(o.userId); d.total += o.total; });
+    });
+    return [...m.values()].sort((a, b) => a.date.localeCompare(b.date)).map((d) => ({ ...d, people: d.people.size }));
+  }, [rangeForms]);
+
+  const formCount = rangeForms.filter((f) => f.orders.length > 0).length; // 沒人訂的空表單不算
   const sum = rows.reduce((s, r) => s + r.total, 0);
+  const paid = rows.reduce((s, r) => s + r.paid, 0);
+  const unpaid = rows.reduce((s, r) => s + r.unpaid, 0);
 
   const exportRows = [
-    ["日期", "訂餐人", "表單", "品項", "備註", "數量", "單價", "小計", "扣款狀態"],
+    ["訂餐日期", "訂餐人", "表單", "品項", "備註", "數量", "單價", "小計", "扣款狀態"],
     ...rows.flatMap((r) => r.detail.flatMap((d) => d.lines.map((l) => [
-      date, r.name, d.form, l.name, l.note || "", l.qty, l.price, l.qty * l.price, d.settled ? "已扣款" : "未扣款",
+      d.date, r.name, d.form, l.name, l.note || "", l.qty, l.price, l.qty * l.price, d.settled ? "已扣款" : "未扣款",
     ]))),
     [],
-    ["日期", "訂餐人", "當日應付"],
-    ...rows.map((r) => [date, r.name, r.total]),
-    ["", "合計", sum],
+    [`期間 ${label}`],
+    ["訂餐人", "期間應付", "已扣款", "未扣款"],
+    ...rows.map((r) => [r.name, r.total, r.paid, r.unpaid]),
+    ["合計", sum, paid, unpaid],
   ];
   const csv = toCsv(exportRows);
   const tsv = exportRows.map((r) => r.join("\t")).join("\n");
+  const fileName = `結算統計-${multiDay ? `${lo}_${hi}` : lo}.csv`;
+
+  // 常用的日期範圍（週一為一週的開始）
+  const t = today();
+  const monday = addDays(t, -((new Date().getDay() + 6) % 7));
+  const monthStart = `${t.slice(0, 8)}01`;
+  const prevMonthEnd = addDays(monthStart, -1);
+  const presets = [
+    ["今天", t, t],
+    ["昨天", addDays(t, -1), addDays(t, -1)],
+    ["本週", monday, t],
+    ["上週", addDays(monday, -7), addDays(monday, -1)],
+    ["本月", monthStart, t],
+    ["上月", `${prevMonthEnd.slice(0, 8)}01`, prevMonthEnd],
+  ];
+  const fmtDay = (d) => {
+    const [y, m, day] = d.split("-").map(Number);
+    return new Date(y, m - 1, day).toLocaleDateString("zh-TW", { month: "numeric", day: "numeric", weekday: "short" });
+  };
 
   return (
     <div>
-      <div className="mb-5 flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <h2 className="text-xl font-semibold tracking-tight">每日結算</h2>
-          <p className="mt-1 text-sm text-stone-500">把當天所有表單合起來，看每個人要付多少。</p>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <input type="date" className={inputCls + " w-auto"} value={date} onChange={(e) => setDate(e.target.value)} />
-          {rows.length > 0 && (
-            <>
-              <Btn size="sm" variant="quiet" onClick={() => downloadText(`每日結算-${date}.csv`, csv, "text/csv")}>
-                <Download size={14} />匯出 CSV
-              </Btn>
-              <CopyButton label="複製成表格" text={tsv} filename={`每日結算-${date}.csv`} mime="text/csv" />
-            </>
-          )}
-        </div>
+      <div className="mb-5">
+        <h2 className="text-xl font-semibold tracking-tight">結算統計</h2>
+        <p className="mt-1 text-sm text-stone-500">選定一段日期，把期間內所有表單合起來，看每個人要付多少、哪些還沒扣款。</p>
       </div>
 
-      {rows.length === 0 ? (
-        <Panel><Empty icon={Calendar} title={`${date} 沒有訂餐紀錄`} hint="換一個日期，或先建立表單。" /></Panel>
+      <Panel className="mb-4 p-4">
+        <div className="flex flex-wrap items-center gap-2">
+          <input type="date" aria-label="開始日期" className={inputCls + " w-auto"} value={start} onChange={(e) => setStart(e.target.value)} />
+          <span className="text-stone-400">～</span>
+          <input type="date" aria-label="結束日期" className={inputCls + " w-auto"} value={end} onChange={(e) => setEnd(e.target.value)} />
+        </div>
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          {presets.map(([name, a, b]) => {
+            const active = lo === a && hi === b;
+            return (
+              <button key={name} type="button" onClick={() => { setStart(a); setEnd(b); }}
+                className={`rounded-full border px-3 py-1 text-sm transition-colors ${active ? "mo-chip-solid border-transparent" : "border-stone-300 bg-white text-stone-700 hover:bg-stone-50"}`}>
+                {name}
+              </button>
+            );
+          })}
+          {rows.length > 0 && (
+            <div className="ml-auto flex flex-wrap items-center gap-2">
+              <Btn size="sm" variant="quiet" onClick={() => downloadText(fileName, csv, "text/csv")}>
+                <Download size={14} />匯出 CSV
+              </Btn>
+              <CopyButton label="複製成表格" text={tsv} filename={fileName} mime="text/csv" />
+            </div>
+          )}
+        </div>
+      </Panel>
+
+      {!valid ? (
+        <Panel><Empty icon={Calendar} title="請選擇開始與結束日期" /></Panel>
+      ) : rows.length === 0 ? (
+        <Panel><Empty icon={Calendar} title={`${label} 沒有訂餐紀錄`} hint="換一個日期範圍，或先建立表單。" /></Panel>
       ) : (
         <>
           <Panel className="mb-4 p-5">
-            <p className="text-sm text-stone-500">{date} 共 {rows.length} 人、{dayForms.length} 張表單</p>
+            <p className="text-sm text-stone-500">{label} 共 {rows.length} 人、{formCount} 張表單</p>
             <p className="mt-1 text-3xl font-semibold tabular-nums mo-text-strong">{money(sum)}</p>
+            <div className="mt-3 flex flex-wrap gap-x-6 gap-y-1 text-sm tabular-nums">
+              <span className="text-stone-600">已扣款 <span className="font-semibold">{money(paid)}</span></span>
+              <span className={unpaid > 0 ? "mo-text-mid" : "text-stone-600"}>未扣款 <span className="font-semibold">{money(unpaid)}</span></span>
+            </div>
+            {multiDay && byDay.length > 0 && (
+              <div className="mt-4 border-t border-stone-100 pt-3">
+                <p className="mb-1.5 text-xs font-medium text-stone-500">每日小計</p>
+                <div className="space-y-1">
+                  {byDay.map((d) => (
+                    <p key={d.date} className="flex justify-between gap-3 text-sm text-stone-600 tabular-nums">
+                      <span>{fmtDay(d.date)}　{d.forms} 張表單、{d.people} 人</span>
+                      <span>{money(d.total)}</span>
+                    </p>
+                  ))}
+                </div>
+              </div>
+            )}
           </Panel>
           <Panel>
             <div className="divide-y divide-stone-100">
               {rows.map((r) => (
                 <div key={r.userId} className="px-4 py-4">
-                  <div className="flex items-center justify-between">
+                  <div className="flex items-start justify-between gap-3">
                     <span className="font-medium">{r.name}</span>
-                    <span className="text-lg font-semibold tabular-nums">{money(r.total)}</span>
+                    <span className="text-right">
+                      <span className="block text-lg font-semibold tabular-nums">{money(r.total)}</span>
+                      {r.unpaid > 0 && r.paid > 0 && <span className="block text-xs tabular-nums mo-text-mid">未扣款 {money(r.unpaid)}</span>}
+                    </span>
                   </div>
                   <div className="mt-1.5 space-y-0.5">
                     {r.detail.map((d, i) => (
-                      <p key={i} className="text-sm text-stone-600 tabular-nums">
+                      <p key={i} className="text-sm text-stone-600">
+                        {multiDay && <span className="mr-2 tabular-nums text-stone-400">{d.date.slice(5)}</span>}
                         <span className="text-stone-400">{d.form}</span>
-                        {d.lines.map((l) => `${l.name}${l.note ? `（${l.note}）` : ""}×${l.qty}`).join("、")}　{money(d.total)}
+                        <span className="ml-2">{d.lines.map((l) => `${l.name}${l.note ? `（${l.note}）` : ""}×${l.qty}`).join("、")}</span>
+                        <span className="ml-2 tabular-nums">{money(d.total)}</span>
                         {d.settled
                           ? <span className="ml-2 text-xs mo-text-strong">已扣款</span>
                           : <span className="ml-2 text-xs mo-text-mid">未扣款</span>}
@@ -1619,7 +1714,6 @@ function DailySettlement({ forms, txs, users }) {
     </div>
   );
 }
-
 /* ---------------- 成員與儲值金 ---------------- */
 const REASONS = ["儲值", "退款", "轉帳", "現金收款", "更正錯帳", "其他"];
 
