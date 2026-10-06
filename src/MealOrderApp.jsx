@@ -1894,7 +1894,7 @@ function Vault({ users, balances, txs }) {
       </div>
       {negatives.length > 0 && (
         <p className="mt-4 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-800">
-          有 {negatives.length} 人已透支：{negatives.map((u) => u.name).join("、")}。透支金額已經算進上面的總額，核對現金時記得扣掉。
+          有 {negatives.length} 人已透支（訂餐花的比儲值的多）：{negatives.map((u) => u.name).join("、")}。他們的負數餘額已經扣在上面的總額裡，核對現金時直接拿總額比對就好，不用再另外加減；他們補儲值之後，總額和手上的現金會一起增加。
         </p>
       )}
     </Panel>
