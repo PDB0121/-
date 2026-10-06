@@ -1786,11 +1786,25 @@ function People({ users, balances, txs, saveUsers, saveTxs, onRefresh }) {
     setAddBusy(false); setName(""); setInitial(""); closeAdd();
   };
 
+  const blockedBody = (who, forms) =>
+    `${who} 在下面這些還沒結算的表單裡還有訂單：\n\n${forms.map((f) => `・${f.title}（${f.date}）`).join("\n")}\n\n請先把這些表單結算，或到表單裡把他的訂單刪除，再回來刪除成員。`;
+
   const removeUser = async (u) => {
-    const ok = await askConfirm({ title: `刪除 ${u.name}？`, body: "這個人的儲值紀錄和扣款明細會一起移除，無法復原。", danger: true, confirmLabel: "刪除成員" });
+    // 先請伺服器檢查：還有沒結算的訂單就不能刪（刪了之後那張表單結算時，那筆錢不會算進金庫餘額）
+    const chk = await adminApi("/remove-member", { method: "POST", body: { userId: u.id, dryRun: true } });
+    if (!chk.ok) return askNotice("無法刪除", (chk.data && chk.data.error) || "請稍後再試。");
+    if (!chk.data.canDelete) return askNotice(`還不能刪除 ${u.name}`, blockedBody(u.name, chk.data.forms));
+
+    const ok = await askConfirm({
+      title: `刪除 ${u.name}？`,
+      body: `目前餘額 ${money(chk.data.balance)}，共 ${chk.data.txCount} 筆儲值與扣款紀錄，會一起移除，無法復原。\n\n刪除前請確認已經跟他把現金收付清楚（他的餘額 = 你實際收付的金額），總儲值金餘額才會跟手上的錢對得上。`,
+      danger: true, confirmLabel: "刪除成員",
+    });
     if (!ok) return;
-    await saveUsers(users.filter((x) => x.id !== u.id));
-    await saveTxs(txs.filter((t) => t.userId !== u.id));
+    const r = await adminApi("/remove-member", { method: "POST", body: { userId: u.id } });
+    if (r.status === 409) return askNotice(`還不能刪除 ${u.name}`, blockedBody(u.name, (r.data && r.data.forms) || []));
+    if (!r.ok) return askNotice("刪除失敗", (r.data && r.data.error) || "請稍後再試。");
+    await onRefresh();
   };
 
   return (
