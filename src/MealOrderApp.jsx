@@ -704,7 +704,7 @@ export default function MealOrderApp() {
             : <AdminForms forms={forms} saveForms={saveForms} onOpen={setOpenFormId} />
         )}
         {role === "admin" && tab === "daily" && <DailySettlement forms={forms} txs={txs} users={users} />}
-        {role === "admin" && tab === "people" && <People users={users} balances={balances} txs={txs} saveUsers={saveUsers} saveTxs={saveTxs} />}
+        {role === "admin" && tab === "people" && <People users={users} balances={balances} txs={txs} saveUsers={saveUsers} saveTxs={saveTxs} onRefresh={() => refresh(false)} />}
         {role === "admin" && tab === "ledger" && <AdminLedger txs={txs} users={users} />}
         {role === "admin" && tab === "settings" && <SettingsPane cfg={cfg} saveCfg={saveCfg} onWipe={async () => { await saveForms([]); await saveTxs([]); await saveUsers([]); }} />}
 
@@ -1717,11 +1717,46 @@ function DailySettlement({ forms }) {
 /* ---------------- 成員與儲值金 ---------------- */
 const REASONS = ["儲值", "退款", "轉帳", "現金收款", "更正錯帳", "其他"];
 
-function People({ users, balances, txs, saveUsers, saveTxs }) {
+/* 修改成員姓名：伺服器會一併更新過去的訂單與扣款明細上的名字 */
+function RenameModal({ user, onClose, onDone }) {
+  const [value, setValue] = useState(user.name);
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const submit = async () => {
+    if (busy) return;
+    const v = value.trim();
+    if (!v) return setErr("姓名不能空白。");
+    if (v.length > 30) return setErr("姓名最多 30 個字。");
+    if (v === user.name) return onClose();
+    setBusy(true); setErr("");
+    const r = await adminApi("/rename-member", { method: "POST", body: { userId: user.id, name: v } });
+    if (!r.ok) { setBusy(false); return setErr((r.data && r.data.error) || "改名失敗，請稍後再試。"); }
+    await onDone();
+  };
+
+  return (
+    <Modal open onClose={onClose} title={`修改「${user.name}」的姓名`}>
+      <Field label="新的姓名" hint="過去的訂單、扣款明細與統計上的名字會一起更新，餘額與紀錄都不受影響。">
+        <input className={inputCls} value={value} autoFocus placeholder="例如：王小明"
+          onChange={(e) => { setValue(e.target.value); setErr(""); }}
+          onKeyDown={(e) => { if (e.key === "Enter") submit(); }} />
+      </Field>
+      {err && <p className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-800">{err}</p>}
+      <div className="mt-6 flex justify-end gap-2">
+        <Btn variant="quiet" onClick={onClose}>取消</Btn>
+        <Btn disabled={busy} onClick={submit}>{busy ? "儲存中…" : "儲存"}</Btn>
+      </div>
+    </Modal>
+  );
+}
+
+function People({ users, balances, txs, saveUsers, saveTxs, onRefresh }) {
   const [adding, setAdding] = useState(false);
   const [name, setName] = useState("");
   const [initial, setInitial] = useState("");
   const [target, setTarget] = useState(null);
+  const [renaming, setRenaming] = useState(null);
 
   const addUser = async () => {
     if (!name.trim()) return;
@@ -1765,7 +1800,7 @@ function People({ users, balances, txs, saveUsers, saveTxs }) {
             {users.map((u) => {
               const b = balances[u.id] || 0;
               return (
-                <div key={u.id} className="flex items-center gap-3 px-4 py-4">
+                <div key={u.id} className="flex items-center gap-2 px-3 py-4 sm:gap-3 sm:px-4">
                   <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full mo-bg-solid text-sm font-semibold mo-text-ondark-strong">
                     {u.name.slice(0, 1)}
                   </div>
@@ -1776,7 +1811,9 @@ function People({ users, balances, txs, saveUsers, saveTxs }) {
                     </p>
                   </div>
                   <Btn size="sm" variant="quiet" onClick={() => setTarget(u)}>調整儲值金</Btn>
-                  <button onClick={() => removeUser(u)} className="rounded-lg p-2 text-stone-400 hover:bg-red-50 hover:text-red-800"><Trash2 size={16} /></button>
+                  <button onClick={() => setRenaming(u)} title="修改姓名" aria-label={`修改 ${u.name} 的姓名`}
+                    className="rounded-lg p-1.5 text-stone-400 hover:bg-stone-100 hover:text-stone-700 sm:p-2"><Edit3 size={16} /></button>
+                  <button onClick={() => removeUser(u)} className="rounded-lg p-1.5 text-stone-400 hover:bg-red-50 hover:text-red-800 sm:p-2"><Trash2 size={16} /></button>
                 </div>
               );
             })}
@@ -1796,6 +1833,11 @@ function People({ users, balances, txs, saveUsers, saveTxs }) {
           <Btn onClick={addUser}>新增</Btn>
         </div>
       </Modal>
+
+      {renaming && (
+        <RenameModal key={renaming.id} user={renaming} onClose={() => setRenaming(null)}
+          onDone={async () => { setRenaming(null); await onRefresh(); }} />
+      )}
 
       <AdjustModal user={target} onClose={() => setTarget(null)} balance={target ? balances[target.id] || 0 : 0}
         onSubmit={async (amount, reason, note) => {
