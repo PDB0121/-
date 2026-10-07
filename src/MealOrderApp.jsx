@@ -705,7 +705,7 @@ export default function MealOrderApp() {
         )}
         {role === "admin" && tab === "daily" && <DailySettlement forms={forms} txs={txs} users={users} />}
         {role === "admin" && tab === "people" && <People users={users} balances={balances} txs={txs} saveUsers={saveUsers} saveTxs={saveTxs} onRefresh={() => refresh(false)} />}
-        {role === "admin" && tab === "ledger" && <AdminLedger txs={txs} users={users} />}
+        {role === "admin" && tab === "ledger" && <AdminLedger txs={txs} users={users} onRefresh={() => refresh(false)} />}
         {role === "admin" && tab === "settings" && <SettingsPane cfg={cfg} saveCfg={saveCfg} onWipe={async () => { await saveForms([]); await saveTxs([]); await saveUsers([]); }} />}
 
         {role === "user" && tab === "order" && (
@@ -1972,20 +1972,55 @@ function AdjustModal({ user, onClose, onSubmit, balance }) {
 }
 
 /* ---------------- 管理員：扣款明細 ---------------- */
-function AdminLedger({ txs, users }) {
+const AUDIT_FIELD = { amount: "金額", date: "日期", reason: "原因", note: "補充說明" };
+function describeAudit(a) {
+  if (a.action === "delete") return [`刪除：${a.before.date}　${a.before.reason}　${money(a.before.amount)}${a.before.note ? `　（${a.before.note}）` : ""}`];
+  return (a.changed || []).map((f) => (f === "amount"
+    ? `${AUDIT_FIELD[f]} ${money(a.before[f])} → ${money(a.after[f])}`
+    : `${AUDIT_FIELD[f]}「${a.before[f] || "（空）"}」→「${a.after[f] || "（空）"}」`));
+}
+
+function AdminLedger({ txs, users, onRefresh }) {
   const [who, setWho] = useState("all");
   const [kind, setKind] = useState("all");
+  const [editing, setEditing] = useState(null);
+  const [audit, setAudit] = useState(null);
+  const [showAllAudit, setShowAllAudit] = useState(false);
+
+  const loadAudit = useCallback(async () => {
+    const r = await adminApi("/ledger-correct?audit=1");
+    if (r.ok) setAudit(r.data.items || []);
+  }, []);
+  useEffect(() => { loadAudit(); }, [loadAudit]);
+
+  const balanceOf = (userId) => txs.filter((t) => t.userId === userId).reduce((s, t) => s + (Number(t.amount) || 0), 0);
 
   const rows = txs
     .filter((t) => (who === "all" ? true : t.userId === who))
     .filter((t) => (kind === "all" ? true : kind === "order" ? t.type === "order" : t.type !== "order"))
     .sort((a, b) => (b.ts || "").localeCompare(a.ts || ""));
 
+  const removeTx = async (t) => {
+    const b = balanceOf(t.userId);
+    const ok = await askConfirm({
+      title: "刪除這筆明細？",
+      body: `${t.userName}　${t.date}　${t.type === "order" ? "訂餐扣款" : t.reason}　${money(t.amount)}\n\n刪除後 ${t.userName} 的餘額會從 ${money(b)} 變成 ${money(b - t.amount)}。\n這個動作會記在「更正紀錄」裡，但這筆明細本身無法復原。`,
+      danger: true, confirmLabel: "刪除這筆",
+    });
+    if (!ok) return;
+    const r = await adminApi("/ledger-correct", { method: "POST", body: { action: "delete", txId: t.id } });
+    if (!r.ok) return askNotice("刪除失敗", (r.data && r.data.error) || "請稍後再試。");
+    await onRefresh();
+    loadAudit();
+  };
+
+  const shownAudit = audit ? (showAllAudit ? audit : audit.slice(0, 10)) : [];
+
   return (
     <div>
       <div className="mb-5">
         <h2 className="text-xl font-semibold tracking-tight">扣款明細</h2>
-        <p className="mt-1 text-sm text-stone-500">所有人的每一筆進出，含日期、品項與金額。</p>
+        <p className="mt-1 text-sm text-stone-500">所有人的每一筆進出，含日期、品項與金額。記錯的可以更正或刪除，每次更正都會留下紀錄。</p>
       </div>
 
       <div className="mb-4 flex flex-wrap gap-2">
@@ -2003,33 +2038,126 @@ function AdminLedger({ txs, users }) {
       {rows.length === 0 ? (
         <Panel><Empty icon={Receipt} title="沒有符合的紀錄" hint="結算表單或調整儲值金之後，紀錄會出現在這裡。" /></Panel>
       ) : (
-        <Panel><LedgerTable rows={rows} showName /></Panel>
+        <Panel><LedgerTable rows={rows} showName onEdit={setEditing} onDelete={removeTx} /></Panel>
+      )}
+
+      <Panel className="mt-6 p-5">
+        <p className="text-sm font-medium text-stone-800">更正紀錄{audit ? `（${audit.length}）` : ""}</p>
+        <p className="mt-1 text-sm text-stone-500">每次更正或刪除明細都會記在這裡，保留最近 500 筆。</p>
+        {audit && audit.length === 0 && <p className="mt-3 text-sm text-stone-500">還沒有任何更正。</p>}
+        {shownAudit.length > 0 && (
+          <div className="mt-3 divide-y divide-stone-100">
+            {shownAudit.map((a) => (
+              <div key={a.id} className="py-3">
+                <p className="text-sm">
+                  <span className="font-medium">{a.userName}</span>
+                  <span className={`ml-2 rounded px-1.5 py-0.5 text-xs ${a.action === "delete" ? "bg-red-50 text-red-800" : "mo-badge"}`}>{a.action === "delete" ? "刪除" : "更正"}</span>
+                  <span className="ml-2 text-xs text-stone-400 tabular-nums">{fmtDateTime(a.at)}</span>
+                </p>
+                {describeAudit(a).map((line, i) => <p key={i} className="mt-0.5 text-sm text-stone-600 tabular-nums">{line}</p>)}
+              </div>
+            ))}
+          </div>
+        )}
+        {audit && audit.length > 10 && (
+          <button type="button" onClick={() => setShowAllAudit((v) => !v)} className="mt-3 text-sm text-stone-500 hover:text-stone-800">
+            {showAllAudit ? "只看最近 10 筆" : `顯示全部 ${audit.length} 筆`}
+          </button>
+        )}
+      </Panel>
+
+      {editing && (
+        <LedgerEditModal key={editing.id} tx={editing} balance={balanceOf(editing.userId)} onClose={() => setEditing(null)}
+          onDone={async () => { setEditing(null); await onRefresh(); loadAudit(); }} />
       )}
     </div>
   );
 }
 
-function LedgerTable({ rows, showName }) {
+/* 更正一筆明細：金額、日期、原因、補充說明（類型不能改） */
+function LedgerEditModal({ tx, balance, onClose, onDone }) {
+  const [amount, setAmount] = useState(String(tx.amount));
+  const [date, setDate] = useState(tx.date || "");
+  const [reason, setReason] = useState(tx.reason || "");
+  const [note, setNote] = useState(tx.note || "");
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const n = Number(amount);
+  const amountOk = amount.trim() !== "" && Number.isFinite(n) && n !== 0;
+  const after = amountOk ? balance - tx.amount + n : balance;
+
+  const submit = async () => {
+    if (busy) return;
+    if (!amountOk) return setErr("金額要是一個不是 0 的數字。");
+    if (!date) return setErr("請選擇日期。");
+    if (!reason.trim()) return setErr("原因不能空白。");
+    const patch = {};
+    if (n !== tx.amount) patch.amount = n;
+    if (date !== tx.date) patch.date = date;
+    if (reason.trim() !== (tx.reason || "")) patch.reason = reason.trim();
+    if (note.trim() !== (tx.note || "")) patch.note = note.trim();
+    if (Object.keys(patch).length === 0) return onClose();
+    setBusy(true); setErr("");
+    const r = await adminApi("/ledger-correct", { method: "POST", body: { action: "edit", txId: tx.id, patch } });
+    if (!r.ok) { setBusy(false); return setErr((r.data && r.data.error) || "更正失敗，請稍後再試。"); }
+    await onDone();
+  };
+
+  return (
+    <Modal open onClose={onClose} title="更正這筆明細">
+      <p className="mb-4 text-sm text-stone-500">{tx.userName}　{tx.type === "order" ? "訂餐扣款" : "儲值與調整"}</p>
+      <div className="space-y-4">
+        <Field label="金額" hint={tx.type === "order" ? "訂餐扣款要填負數，例如 -120。" : "增加餘額填正數，減少餘額填負數，例如 -100。"}>
+          <input className={inputCls + " tabular-nums"} value={amount} onChange={(e) => { setAmount(e.target.value.replace(/[^0-9.-]/g, "")); setErr(""); }} />
+        </Field>
+        <Field label="日期"><input type="date" className={inputCls} value={date} onChange={(e) => { setDate(e.target.value); setErr(""); }} /></Field>
+        <Field label={tx.type === "order" ? "原因（表單名稱）" : "原因"}>
+          <input className={inputCls} list="ledger-reasons" value={reason} onChange={(e) => { setReason(e.target.value); setErr(""); }} />
+          <datalist id="ledger-reasons">{REASONS.map((r) => <option key={r} value={r} />)}</datalist>
+        </Field>
+        <Field label="補充說明（可留空）">
+          <input className={inputCls} value={note} onChange={(e) => setNote(e.target.value)} placeholder="例如：原本多打一個 0" />
+        </Field>
+      </div>
+      <p className="mt-4 rounded-lg bg-stone-50 px-3 py-2.5 text-sm text-stone-600 tabular-nums">
+        {tx.userName} 的餘額：{money(balance)} → <span className={`font-semibold ${after < 0 ? "text-red-800" : "mo-text-strong"}`}>{money(after)}</span>
+      </p>
+      {tx.type === "order" && <p className="mt-2 text-xs text-stone-500">這只會改這筆扣款的金額，不會改表單裡的訂單內容與金額。</p>}
+      <p className="mt-2 text-xs text-stone-500">更正後這筆明細會標示「已更正」，更正前的內容會留在「更正紀錄」。</p>
+      {err && <p className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-800">{err}</p>}
+      <div className="mt-6 flex justify-end gap-2">
+        <Btn variant="quiet" onClick={onClose}>取消</Btn>
+        <Btn disabled={busy} onClick={submit}>{busy ? "儲存中…" : "儲存更正"}</Btn>
+      </div>
+    </Modal>
+  );
+}
+
+function LedgerTable({ rows, showName, onEdit, onDelete }) {
+  const editable = !!(onEdit || onDelete);
   return (
     <div className="overflow-x-auto">
       <table className="w-full text-sm">
         <thead>
           <tr className="border-b border-stone-200 text-left text-stone-500">
-            <th className="px-4 py-3 font-medium">日期</th>
-            {showName && <th className="px-4 py-3 font-medium">成員</th>}
-            <th className="px-4 py-3 font-medium">品項／原因</th>
-            <th className="px-4 py-3 text-right font-medium">金額</th>
+            <th className="px-2 py-3 font-medium sm:px-4">日期</th>
+            {showName && <th className="px-2 py-3 font-medium sm:px-4">成員</th>}
+            <th className="px-2 py-3 font-medium sm:px-4">品項／原因</th>
+            <th className="px-2 py-3 text-right font-medium sm:px-4">金額</th>
+            {editable && <th className="px-2 py-3"><span className="sr-only">操作</span></th>}
           </tr>
         </thead>
         <tbody>
           {rows.map((t) => (
             <tr key={t.id} className="border-b border-stone-100 last:border-0 align-top">
-              <td className="whitespace-nowrap px-4 py-3 tabular-nums text-stone-600">{t.date}</td>
-              {showName && <td className="whitespace-nowrap px-4 py-3 font-medium">{t.userName}</td>}
-              <td className="px-4 py-3">
+              <td className="whitespace-nowrap px-2 py-3 tabular-nums text-stone-600 sm:px-4"><span className="sm:hidden">{String(t.date || "").slice(5)}</span><span className="hidden sm:inline">{t.date}</span></td>
+              {showName && <td className="whitespace-nowrap px-2 py-3 font-medium sm:px-4">{t.userName}</td>}
+              <td className="px-2 py-3 sm:px-4">
                 {t.type === "order" ? (
                   <>
                     <span className="text-xs text-stone-400">{t.reason}</span>
+                    {t.correctedAt && <span className="ml-2 whitespace-nowrap rounded mo-badge px-1.5 py-0.5 text-xs">已更正</span>}
                     <ul className="mt-0.5 space-y-0.5">
                       {(t.items || []).map((l, i) => (
                         <li key={i}>
@@ -2038,15 +2166,25 @@ function LedgerTable({ rows, showName }) {
                         </li>
                       ))}
                     </ul>
+                    {t.note && <p className="mt-0.5 text-xs text-stone-500">{t.note}</p>}
                   </>
                 ) : (
                   <>
                     <span className="rounded-md bg-stone-100 px-2 py-0.5 text-xs text-stone-700">{t.reason}</span>
+                    {t.correctedAt && <span className="ml-2 whitespace-nowrap rounded mo-badge px-1.5 py-0.5 text-xs">已更正</span>}
                     {t.note && <span className="ml-2 text-xs text-stone-500">{t.note}</span>}
                   </>
                 )}
               </td>
-              <td className="whitespace-nowrap px-4 py-3 text-right"><Money v={t.amount} strong /></td>
+              <td className="whitespace-nowrap px-2 py-3 text-right sm:px-4"><Money v={t.amount} strong /></td>
+              {editable && (
+                <td className="sticky right-0 whitespace-nowrap bg-white px-1 py-2 text-right">
+                  {onEdit && <button type="button" onClick={() => onEdit(t)} title="更正" aria-label="更正這筆明細"
+                    className="rounded-lg p-1.5 text-stone-400 hover:bg-stone-100 hover:text-stone-700"><Edit3 size={15} /></button>}
+                  {onDelete && <button type="button" onClick={() => onDelete(t)} title="刪除" aria-label="刪除這筆明細"
+                    className="rounded-lg p-1.5 text-stone-400 hover:bg-red-50 hover:text-red-800"><Trash2 size={15} /></button>}
+                </td>
+              )}
             </tr>
           ))}
         </tbody>
@@ -2054,7 +2192,6 @@ function LedgerTable({ rows, showName }) {
     </div>
   );
 }
-
 /* ---------------- 設定 ---------------- */
 function SettingsPane({ cfg, saveCfg, onWipe }) {
   const [title, setTitle] = useState(cfg.title || "今天吃什麼");
