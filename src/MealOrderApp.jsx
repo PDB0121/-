@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useRef, useCallback } from "react"
 import {
   Utensils, Users, Wallet, Receipt, Shield, User, RefreshCw, Plus, Minus,
   Trash2, Check, X, ChevronLeft, Upload, Loader2, ClipboardList, Calendar,
-  Lock, LogOut, Settings, Search, FileText, ImageIcon, CircleDollarSign, Copy, Download, Edit3, Clock, ExternalLink,
+  Lock, LogOut, Settings, Search, FileText, ImageIcon, CircleDollarSign, Copy, Download, Edit3, Clock, ExternalLink, Eye, EyeOff,
 } from "lucide-react";
 
 /* ---------------- storage ----------------
@@ -743,7 +743,9 @@ function Gate({ users, cfg, onAdmin, onUser }) {
   const [checking, setChecking] = useState(false);
   const [q, setQ] = useState("");
 
-  const list = users.filter((u) => u.name.includes(q));
+  // 被管理員隱藏的成員不會出現在「我是誰」的名單裡（管理員端仍看得到、操作得到）
+  const visible = users.filter((u) => !u.hidden);
+  const list = visible.filter((u) => u.name.includes(q));
 
   const tryAdminLogin = async () => {
     if (checking) return;
@@ -805,9 +807,9 @@ function Gate({ users, cfg, onAdmin, onUser }) {
 
         {mode === "user" && (
           <div className="rounded-xl bg-white p-5">
-            {users.length === 0 ? (
+            {visible.length === 0 ? (
               <div className="py-6 text-center">
-                <p className="text-sm text-stone-600">還沒有任何訂餐者。請管理員先到「成員儲值」建立名單。</p>
+                <p className="text-sm text-stone-600">{users.length === 0 ? "還沒有任何訂餐者。請管理員先到「成員儲值」建立名單。" : "目前沒有開放選擇的成員，請聯絡管理員。"}</p>
                 <div className="mt-4"><Btn variant="quiet" onClick={() => setMode(null)}>返回</Btn></div>
               </div>
             ) : (
@@ -1789,6 +1791,14 @@ function People({ users, balances, txs, saveUsers, saveTxs, onRefresh }) {
   const blockedBody = (who, forms) =>
     `${who} 在下面這些還沒結算的表單裡還有訂單：\n\n${forms.map((f) => `・${f.title}（${f.date}）`).join("\n")}\n\n請先把這些表單結算，或到表單裡把他的訂單刪除，再回來刪除成員。`;
 
+  // 隱藏 / 取消隱藏：用最新的名單改，避免蓋掉別人剛新增或改名的成員
+  const toggleHidden = async (u) => {
+    const fresh = await fetchState();
+    if (!fresh) return askNotice("操作失敗", "讀取最新資料失敗，請檢查網路後再試一次。");
+    if (!fresh.users.some((x) => x.id === u.id)) return askNotice("找不到這位成員", "他可能已經被刪除，請重新整理。");
+    await saveUsers(fresh.users.map((x) => (x.id === u.id ? { ...x, hidden: !u.hidden } : x)));
+  };
+
   const removeUser = async (u) => {
     // 先請伺服器檢查：還有沒結算的訂單就不能刪（刪了之後那張表單結算時，那筆錢不會算進金庫餘額）
     const chk = await adminApi("/remove-member", { method: "POST", body: { userId: u.id, dryRun: true } });
@@ -1833,12 +1843,18 @@ function People({ users, balances, txs, saveUsers, saveTxs, onRefresh }) {
                     {u.name.slice(0, 1)}
                   </div>
                   <div className="min-w-0 flex-1">
-                    <p className="font-medium">{u.name}</p>
+                    <p className="font-medium">
+                      <span className={u.hidden ? "text-stone-500" : ""}>{u.name}</span>
+                      {u.hidden && <span className="ml-2 whitespace-nowrap rounded bg-stone-100 px-1.5 py-0.5 text-xs font-normal text-stone-600">已隱藏</span>}
+                    </p>
                     <p className={`text-sm tabular-nums ${b < 0 ? "text-red-800" : b < 100 ? "mo-text-mid" : "text-stone-500"}`}>
                       餘額 {money(b)}{b < 0 ? "　已透支" : b < 100 ? "　該儲值了" : ""}
                     </p>
                   </div>
                   <Btn size="sm" variant="quiet" onClick={() => setTarget(u)}>調整儲值金</Btn>
+                  <button onClick={() => toggleHidden(u)} title={u.hidden ? "取消隱藏（讓他出現在「我要訂餐」名單）" : "隱藏（不出現在「我要訂餐」名單）"}
+                    aria-label={u.hidden ? `取消隱藏 ${u.name}` : `隱藏 ${u.name}`}
+                    className="rounded-lg p-1.5 text-stone-400 hover:bg-stone-100 hover:text-stone-700 sm:p-2">{u.hidden ? <EyeOff size={16} /> : <Eye size={16} />}</button>
                   <button onClick={() => setRenaming(u)} title="修改姓名" aria-label={`修改 ${u.name} 的姓名`}
                     className="rounded-lg p-1.5 text-stone-400 hover:bg-stone-100 hover:text-stone-700 sm:p-2"><Edit3 size={16} /></button>
                   <button onClick={() => removeUser(u)} className="rounded-lg p-1.5 text-stone-400 hover:bg-red-50 hover:text-red-800 sm:p-2"><Trash2 size={16} /></button>
